@@ -55,7 +55,7 @@ Avenue uses the same layout under its own folder name. The plugin then appears u
 **Sources** as **SW Pattern**.
 
 The macOS download is a universal build (Apple silicon and Intel), as a `.dmg` or a `.zip`.
-The Windows download is an x64 installer or a `.zip`. It is not code-signed, so the installer
+It is **Developer ID-signed and notarised**, so the bundle simply loads. The Windows download is an x64 installer or a `.zip`. It is not code-signed, so the installer
 trips SmartScreen once: **More info** → **Run anyway**.
 
 ---
