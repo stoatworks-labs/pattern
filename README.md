@@ -212,7 +212,9 @@ It records the build, the GL driver, what unit the host's clock turned out to
 be, whether any audio reached the layer, and which tempo the clock is following
 — the first two of which are the commonest reasons a pattern never fills.
 
+<!-- attributions:start -->
 This project is built on other people's work — see [ATTRIBUTIONS.md](ATTRIBUTIONS.md).
+<!-- attributions:end -->
 
 ## Licence
 

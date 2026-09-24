@@ -3,10 +3,8 @@
 Pattern is built on other people's work. This file lists what that work is, who did
 it, and what it is doing here.
 
-**Provisional hand copy.** In a released repo this file is generated — the master
-lists live in the `stoatworks-backend` repo and are pushed out by
-`scripts/sync-attributions.py`. pattern is not registered yet, so this copy was
-written by hand in the same shape; the first sync overwrites it.
+It is generated — the master lists live in the `stoatworks-backend` repo and are
+pushed out by `scripts/sync-attributions.py`. Edit it there, not here.
 
 ## Code we derived from other people's work
 
@@ -18,7 +16,7 @@ Someone else solved this first, and this project would not exist in its current 
 Licence: MIT  
 Copyright: Stoatworks Labs
 
-source/Font.{h,cpp} — the 5×7 bitmap font every character on the pattern screen is drawn from — carried across from graticule unchanged, by way of needle. It is graticule's own design, drawn as pictures in Font.cpp; it is not a copy of, and was not traced from, any computer's ROM font or any tracker's screen font. Here each glyph sits in a 6×8 cell.
+source/Font.{h,cpp}, the 5x7 bitmap font every character on the pattern screen is drawn from, carried across from graticule unchanged by way of needle. It is graticule's own design, drawn as pictures in Font.cpp; it is not a copy of, and was not traced from, any computer's ROM font or any tracker's screen font. Here each glyph sits in a 6x8 cell.
 
 ### Graticule Diag logger and host Clock — Stoatworks graticule
 
@@ -26,7 +24,7 @@ source/Font.{h,cpp} — the 5×7 bitmap font every character on the pattern scre
 Licence: MIT  
 Copyright: Stoatworks Labs
 
-source/Diag.* (the log-file writer, from orrery via graticule) and source/Clock.* (the clock that measures what unit the host's SetTime arrives in, from flipbook via graticule), renamed into this namespace. Clock gained `ForceMilliseconds` from copperlist.
+source/Diag.* (the log-file writer, from orrery via graticule) and source/Clock.* (the clock that measures what unit the host's SetTime arrives in, from flipbook via graticule), renamed into this namespace. Clock gained ForceMilliseconds from copperlist.
 
 ### Source-plugin template and harness plumbing — Stoatworks needle
 
@@ -44,7 +42,7 @@ Copyright: Stoatworks Labs
 
 The --pipe cue-script format and parser, the two-raster sweep in verify.sh, and the lesson that a floor over a host time needs a 1e-6 allowance because 1/60 is not a double.
 
-### Verify, sweep and workflows — Stoatworks needle and tinsel
+### Verify, sweep and workflows — Stoatworks tinsel
 
 <https://github.com/stoatworks-labs/tinsel>  
 Licence: MIT  
@@ -62,7 +60,7 @@ Libraries, SDKs and frameworks the project is built on or bundles.
 Licence: BSD-3-Clause  
 Copyright: FreeFrame
 
-Vendored as a git submodule at external/ffgl, pinned to b1afaf9.
+Vendored as a git submodule at external/ffgl (third_party/ffgl in oxbow).
 
 The plugin ABI itself. An FFGL effect or source is defined by this SDK's headers — there is no other way to be loadable by Resolume Arena and Avenue.
 
@@ -92,7 +90,7 @@ What this set out to be. No code, assets or binaries from any of these were used
 
 ### Amiga-era trackers, as a genre
 
-The pattern editor's arithmetic — 64 rows, a tick of 2.5 / BPM seconds, Speed ticks to a row, hexadecimal row numbers, sample numbers and a `Cxx` volume effect, the note range C-1 to B-3 with C-2 as middle C — is the genre's public convention, and that is all that was taken. No source code, screen layout, font, colour scheme or asset was taken from any tracker, no tracker's output was captured or consulted, and no tracker is named or depicted on screen: the themes are named by colour. The font is graticule's (above). The VU meters' 48 steps and 20 ms fall are this repo's own model of a vblank-driven meter, not a figure read from any program.
+The pattern editor's arithmetic, 64 rows, a tick of 2.5 / BPM seconds, Speed ticks to a row, hexadecimal row numbers, sample numbers and a Cxx volume effect, the note range C-1 to B-3 with C-2 as middle C, is the genre's public convention, and that is all that was taken. No source code, screen layout, font, colour scheme or asset was taken from any tracker, no tracker's output was captured or consulted, and no tracker is named or depicted on screen: the themes are named by colour. The font is graticule's (above). The VU meters' 48 steps and 20 ms fall are this repo's own model of a vblank-driven meter, not a figure read from any program.
 
 ## Getting this wrong
 
