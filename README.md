@@ -25,6 +25,19 @@ plugin for Resolume Arena and Avenue.
 <sub>Four channels, 125 BPM, the harness's own drum loop. Rendered by the
 plugin's offline harness (`pntest`), not captured from Resolume.</sub>
 
+[![Pattern — a tracker's pattern editor written by the music, for Resolume](docs/video-thumb.png)](https://www.youtube.com/watch?v=xsJ5pMAs9Ss)
+
+*[Watch it](https://www.youtube.com/watch?v=xsJ5pMAs9Ss) — 55 seconds, with
+sound: one channel filling on a kick and bass, every channel filling as the band
+comes in, the ring emptying three columns from the cursor down when the band
+drops out, eight channels under the Log bin law on the blue theme, the Manual
+tempo source at half the track's tempo, and Speed 3 with Keep Notes on the
+green theme. Every frame is the real plugin's output: an FFGL plugin has no
+window, so the footage is rendered by this repository's own offline harness
+(`pntest --pipe`, driven by a cue sheet) rather than filmed off a screen, and
+the soundtrack is a track synthesised for the video and fed to the plugin
+through its real audio input, so what is heard is what wrote the pattern.*
+
 ## The one idea
 
 A tracker plays a pattern of 64 rows. The rows advance at a rate set by two
@@ -147,6 +160,13 @@ Not verified, and not pretended:
   tracks, not on programme material through Resolume's FFT.
 - **The harness has run on this Mac's GPU and on CI's software renderer**
   (`ci.yml`, green on the release commit); nothing has timed it elsewhere.
+- **On Windows it has been loaded into Resolume**: a build of this source
+  loads, registers as `SW Pattern` / `PN01` / source and renders in Resolume
+  Arena 7.27.1 on software rendering (win-lab, Mesa llvmpipe, no GPU), with
+  all 23 host controls matching the declaration and the five visual controls
+  moving the picture — 9 of the fleet gate's 9 checks. The box has no sound
+  device, so its 12 audio-driven controls were not exercised there, and the
+  Manual BPM could not be shown moving on the gate's still.
 - No factory presets and no OpenFX port. There is a [user
   guide](https://stoatworks-labs.com/software/pattern/guide/) and a [browser
   demo](https://pattern-demo.stoatworks-labs.com), which is a port rather than

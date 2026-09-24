@@ -319,7 +319,12 @@ CPU; the screen texture is re-uploaded every frame (at most 92 x 41 cells).
 - **Never loaded into Resolume on macOS.** No real audio has reached it in a
   host. How the parameters present in the inspector there is untested. The
   harness has run on this Mac's GPU and on CI's software renderer (green on
-  the release commit).
+  the release commit). On Windows the fleet's Arena gate (plugin-bench,
+  `arena/expect/pattern.json`) passed 9/9 in Resolume Arena 7.27.1 on
+  llvmpipe: load, register, listed as a source, 23 controls matching, render,
+  the five visual controls live (BPM inconclusive: three header digits on a
+  still), clean log, Arena alive; the 12 audio-driven controls SKIP for want
+  of a sound device.
 - **The 64 bins.** Layout, value law and sample rate are the operator's
   switches and the host's `SetSampleRate`, not measurements. An hour in Arena
   with a signal generator would settle all three for the whole fleet.

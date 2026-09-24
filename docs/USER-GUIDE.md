@@ -28,8 +28,13 @@ blue row is the cursor.*
 > matches the font table bit for bit. Seven deliberate faults are shown to make those checks
 > fail, and a one-character change to the shipped shader fails 36 assertions. All 17 controls
 > are shown to change the picture. It has **never been loaded into Resolume on macOS**, and
-> **no real audio has reached it in a host**: the one host it has run in is the fleet's own
-> test host, `oxbow`.
+> **no real audio has reached it in a host**: the one host it has run in there is the fleet's
+> own test host, `oxbow`.
+> On Windows, a build of v0.1.0 loads, registers as a source and renders in Resolume Arena
+> 7.27.1, with all 23 host controls matching what the plugin declares — on software rendering
+> (win-lab, Mesa llvmpipe, no GPU), so that says nothing about a GPU. That box has no sound
+> device, so its 12 audio-driven controls were not exercised there, and the Manual BPM could
+> not be shown moving on the gate's still picture (it changes three digits in the header).
 > Try it on a spare layer before you put it in a show.
 >
 > This codebase was created with AI assistance, directed and reviewed by a human author.
