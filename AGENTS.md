@@ -59,6 +59,8 @@ row as it enters it.
                               FFT, macroblock's spectrum file, the cue script.
     tools/sweep.py            no control is silently dead, at two rasters.
     tools/verify.sh           all of it. Bash: the pipe step reads PIPESTATUS.
+    demo/                     the browser demo: plugin.js (the shaders spliced in
+                              verbatim, the CPU half ported), tools/check_shaders.py.
 
 ---
 
@@ -295,6 +297,53 @@ guide (`docs/USER-GUIDE.md`) and the browser demo (`demo/`) were added at
 release.
 
 ---
+
+## The browser demo
+
+`demo/` is the page at https://pattern-demo.stoatworks-labs.com, built on the
+shared kit in `stoatworks-backend/resolume-demo/` (vendored into `demo/vendor/`;
+never edit it here) and served by this repo's own Worker through a proxied DNS
+record plus a route, because the zone is out of Workers custom domains. It is
+two halves, and they are not equally faithful.
+
+**The shader is the plugin's.** `VERTEX_SHADER`, `FRAGMENT_SHADER_A` and
+`FRAGMENT_SHADER_B` in `demo/plugin.js` are the three raw strings in
+`source/Shaders.cpp`, spliced in by script rather than typed, and the page joins
+A + B as the C++ compiler joins adjacent literals. `demo/tools/check_shaders.py`
+compares each raw string and the join character for character;
+`tools/verify.sh` runs it as "demo shaders". One program, one triangle from
+`gl_VertexID`, the R8 font texture and the RGBA8UI screen texture, as
+`Renderer::Draw`.
+
+**Everything on the CPU is a port that only a reader checks:** `tracker/Bands`,
+`tracker/Tracker` (clock, ring, onset detector with its priming and seed, the
+tempo detector, the meters), `Screen::Compose`, `LayoutFor`, the palettes,
+`Controls.h`, `ToOption` / `Int`, the uniform packing and `Font.cpp`. While
+building it the port was run frame for frame against the C++ (a one-file
+printer over `Tracker.cpp`, `Bands.cpp` and `Screen.cpp`, 2,100 frames across
+a restart, a tempo change, eight channels under Log / Power with swing and
+Keep, and the detector settling on a metronome) and every line was identical —
+but that check lives in nobody's verify script, so the page still says a reader
+is the only check.
+
+Decisions made rather than asked:
+
+- **No audio, no microphone.** The page synthesises the 64 bins from a
+  drum-loop-like programme (kick, clap, a stab whose peak bin moves, closed and
+  open hats on a 16-step grid at 125 BPM; also a metronome, a sparse pattern
+  and silence), laid out as the Linear law assumes and written as magnitudes,
+  with a ±5 % per-bin jitter from an integer hash as the harness does. Every
+  frame is a function of the clock alone. The page hands the port the
+  programme's tempo as the host's (`SetBeatInfo`), never calls `SetSampleRate`
+  (44.1 kHz assumed, as in the plugin), and says on every surface that the
+  spectrum is the page's and the thresholds were set on synthetic spectra.
+- **Speed, Rows Visible and Scale are dropdowns**: the kit has no integer type.
+- **The Audio buffer and the About block are not on the panel**; the clip
+  picker and "use my own" are removed (a source with zero inputs); no backdrop
+  (the screen is drawn opaque).
+- **The kit's clock is the plugin's `SetTime`** in seconds; `Clock`'s unit
+  measurement is not ported. Restart goes backwards, a loop point, as the
+  plugin treats it.
 
 ## What is genuinely verified, and what is assumed
 

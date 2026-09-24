@@ -191,6 +191,22 @@ Found filming the release video, on a synthesised 125 BPM track through
   the limitation. A second halving of the best lag at a 50 % score, tried and
   reverted, did not change the reading.
 
+## Browser demo
+
+**<https://pattern-demo.stoatworks-labs.com>** — the plugin's own shader, copied
+unedited into WebGL2, over a JavaScript port of its tracker (the row clock, the
+ring, the onset and tempo detectors, the meters), its screen composer, layout,
+palettes, parameter conversions and font. **There is no audio in the page**: a
+pattern editor with no audio is an empty grid, so the page synthesises a 64-bin
+spectrum itself — a drum-loop-like programme (kick, clap, a stab, hats) on its
+own clock, nothing sampled — and hands the port the programme's tempo as a host
+would through `SetBeatInfo`. That is the page's spectrum, not Resolume's FFT,
+whose layout, value law and sample rate are unknown, and the onset thresholds
+were set on synthetic spectra like it. Speed, Rows Visible and Scale are
+dropdowns there because the demo kit has no integer control. The port is
+checked by nobody but a reader; the shader copy is checked by
+`demo/tools/check_shaders.py`, run by `tools/verify.sh`. See `demo/README.md`.
+
 ## Installing
 
 Copy `Pattern.bundle` (macOS) or `Pattern.dll` (Windows) into

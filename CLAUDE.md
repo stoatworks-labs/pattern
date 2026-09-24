@@ -92,6 +92,27 @@ Every check carries its negative control and asserts that it fails.
   in AGENTS.md's traps and the user guide.
 - No presets, no OpenFX port. User guide in `docs/`, browser demo in `demo/`.
 
+## Browser demo
+- Live at https://pattern-demo.stoatworks-labs.com (Cloudflare Worker `pattern-demo`,
+  `wrangler.toml`: a route on a proxied `AAAA 100::` DNS record, not a custom
+  domain — the zone is at its 100-domain limit; delete the record and the page
+  goes dark with a green deploy). A push to main deploys it (`deploy.yml`); by
+  hand: `cf-run npx wrangler deploy` from the repo root, then verify by content:
+  `curl -s 'https://pattern-demo.stoatworks-labs.com/?cb=1' | grep -o '<title>[^<]*'`.
+- `demo/plugin.js` carries `source/Shaders.cpp`'s GLSL verbatim as three constants
+  (vertex, and the fragment shader's two raw strings joined A + B), spliced in by
+  script. `demo/tools/check_shaders.py` compares them character for character and
+  `tools/verify.sh` runs it. **Change a shader, copy it across.**
+- Everything else in `plugin.js` is a hand port (Bands, Tracker, Screen, LayoutFor,
+  the palettes, Controls.h, ToOption, Render's uploads and uniforms, Font). Change
+  the C++ and the page silently disagrees; only a reader checks it.
+- No audio: the page synthesises a 64-bin spectrum from a drum-loop-like programme
+  on its own clock and hands the port the programme's tempo as the host's. Not
+  Resolume's FFT. Speed, Rows Visible and Scale are dropdowns (no integer type in
+  the kit).
+- `demo/vendor/` is the shared kit — never edit it; fix it in
+  `stoatworks-backend/resolume-demo/kit/` and re-run its `sync.sh pattern`.
+
 ## Diagnostics
 
 `source/Diag.{h,cpp}` — log file only, no crash handler (this runs inside
