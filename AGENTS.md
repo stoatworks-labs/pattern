@@ -5,8 +5,8 @@ tracker's pattern editor and lets the music write it: a row cursor on the
 tracker's own clock, and an onset detector per channel that writes notes into
 the pattern from the host's 64-bin spectrum. C++17 + GLSL 4.10, CMake,
 universal macOS `.bundle` and a Windows `.dll`. MIT. Intended home
-`github.com/stoatworks-labs/pattern`; built 2026-09-24 as a local v0.1.0 and
-**never loaded into Resolume**.
+`github.com/stoatworks-labs/pattern`; built and released 2026-09-24 as v0.1.0,
+**never loaded into Resolume on macOS**.
 
 `CLAUDE.md` is the command reference. This file is the *why*: the idea, every
 number in the harness and where its tolerance comes from, the negative
@@ -290,8 +290,9 @@ is reachable from a parameter, and `debugFractionalScale` is 0.0 on every
 frame the plugin renders; the shader's `uFrac` branch is the cost of a grid
 check that can fail.
 
-**No presets, no OpenFX port, no browser demo, no user guide.** None is
-required for 0.1.0.
+**No presets and no OpenFX port.** Neither is required for 0.1.0. The user
+guide (`docs/USER-GUIDE.md`) and the browser demo (`demo/`) were added at
+release.
 
 ---
 
@@ -315,9 +316,10 @@ CPU; the screen texture is re-uploaded every frame (at most 92 x 41 cells).
 
 **Assumed, or not yet done:**
 
-- **Never loaded into Resolume**, on any platform. No real audio has reached it
-  in a host. How the parameters present in the inspector is untested. The
-  harness has run on this Mac's GPU only; CI is written and has not run.
+- **Never loaded into Resolume on macOS.** No real audio has reached it in a
+  host. How the parameters present in the inspector there is untested. The
+  harness has run on this Mac's GPU and on CI's software renderer (green on
+  the release commit).
 - **The 64 bins.** Layout, value law and sample rate are the operator's
   switches and the host's `SetSampleRate`, not measurements. An hour in Arena
   with a signal generator would settle all three for the whole fleet.
@@ -325,13 +327,41 @@ CPU; the screen texture is re-uploaded every frame (at most 92 x 41 cells).
   refractory, the 1e-4 absolute floor, the eighth-of-level seed) were set on
   synthetic spectra and one synthetic WAV through the harness's own FFT, whose
   normalisation is not Resolume's. Sensitivity is the hedge.
-- **The tempo detector** has met a metronome and the harness's drum loop, not
-  music.
+- **The tempo detector** has met a metronome and the harness's drum loop, and
+  on the release video's synthesised groove it was wrong: see the traps.
 - **`barPhase`** is unused (open question 1).
-- **`StoatworksAbout.h` and `ATTRIBUTIONS.md` are provisional hand copies** with
-  `guide=""`; registration regenerates both and adds the user-guide button,
-  which needs a `PT_ABOUT_BUTTON_4` in `Controls.h` (the `static_assert` in
-  `Pattern.cpp` will refuse to compile until it is there).
+- **`StoatworksAbout.h` and `ATTRIBUTIONS.md` are generated** by the backend's
+  `sync-about.py` and `sync-attributions.py` since registration; the About
+  block has five entries (`PT_ABOUT_BUTTON_4` carries the user guide).
+
+**Found filming the release video** (2026-09-24, `stoatworks-backend/video/projects/pattern/render.py`,
+a synthesised 125 BPM track through `--wav`, so the harness's FFT and
+normalisation, not Resolume's):
+
+- **A quiet band hears the leading edge of any sharp transient.** A 150 Hz
+  burst with a hard attack wrote all eight channels on its first frame: the
+  first block containing an onset holds only its first milliseconds, whose
+  spectrum is broad, and a silent band's threshold is `kAbsoluteFloor` = 1e-4,
+  far below a −60 dB leak of a 0.6 kick. Each band's floor learns the leak in
+  about `kFloorSeconds`, after which the same kick stays in its band. The
+  video's instruments got 6 ms attacks and 6th/8th-order Butterworths. Whether
+  Resolume's FFT leaks the same way is unmeasured; the guide documents the
+  behaviour rather than a fix, because the absolute floor is a tuning with no
+  measurement behind either side.
+- **A band with a sustained instrument in it adapts to that instrument.** With
+  the bass under the kick (both in bin 0), eight channels wrote the kick in
+  channel 2 (bins 1–2, the leak) and never in channel 1: bin 0's floor was
+  held up by the bass's own frame-to-frame movement and the kick failed the
+  4.24 ratio there. Not a defect of the detector as specified; a fact about
+  running it on programme material.
+- **The tempo detector read the bar, not the beat.** Three takes read 62 for
+  125 (a clap on two and four and a bass figure turning every bar correlate
+  best at the whole bar), a syncopated first cut read 100 (its arpeggio gate's
+  strongest recurrence was five sixteenths), and a straight kick-and-hats pulse
+  read 62 as well. Tried: halving the best lag repeatedly at a 50 % score
+  instead of once at 70 % — `--detected` still passed and the reading did not
+  change, so it was reverted rather than shipped unverified. The video uses
+  Host and Manual; the guide records the limitation. Open question 7.
 
 ---
 
@@ -357,3 +387,9 @@ CPU; the screen texture is re-uploaded every frame (at most 92 x 41 cells).
 6. **Should Detected tempo smooth its updates?** Each second's reading
    re-anchors the clock; on music with a weak pulse that may wander. A median
    of the last three readings is the obvious next step.
+7. **Should the tempo detector weight the low band, or the onsets, rather
+   than the total flux?** On the release video's groove the whole-envelope
+   autocorrelation preferred the bar (see the traps). A kick-band envelope,
+   or a comb over the candidate lags scored against their multiples, would
+   be the two things to try, with a harness check on a synthesised groove
+   rather than a metronome.

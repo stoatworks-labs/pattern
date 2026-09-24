@@ -13,7 +13,9 @@
 > control that must fail, and one does. Every one of the 17 controls is proven to
 > change the picture at two rasters, and the bundle registers, instantiates and
 > lights pixels under the fleet's oxbow host. **It has never been loaded into
-> Resolume.**
+> Resolume on macOS**, and no real audio has reached it in a host: the release
+> video was rendered by the harness from a synthesised track through the
+> plugin's real audio input, and what that found is in the Status section.
 
 A tracker's pattern editor, written by the music as it plays. An FFGL **source**
 plugin for Resolume Arena and Avenue.
@@ -90,7 +92,7 @@ used yet (see `AGENTS.md`).
 
 ## Status
 
-**v0.1.0, built 2026-09-24, unreleased, and honestly early.**
+**v0.1.0, released 2026-09-24, and honestly early.**
 
 Verified, by measurement on this machine (Apple Silicon, macOS 26.4), with
 `tools/verify.sh` green:
@@ -136,16 +138,38 @@ Verified, by measurement on this machine (Apple Silicon, macOS 26.4), with
 
 Not verified, and not pretended:
 
-- **Never loaded into Resolume**, on any platform. Everything above is the
-  offline harness driving the real plugin class in a headless GL context. How
-  17 controls in three groups present in the inspector is untested.
+- **Never loaded into Resolume on macOS.** Everything above is the offline
+  harness driving the real plugin class in a headless GL context. How 17
+  controls in three groups present in the inspector there is untested.
 - **No real audio has reached it in a host.** The 64 bins' layout, value law and
   sample rate are assumed (`Bin Law`, `Bin Value`, `SetSampleRate`), and the
-  onset detector's thresholds were set on synthetic spectra and one synthetic
-  WAV, not on programme material through Resolume's FFT.
-- **The harness has run on this Mac's GPU only.** CI is written but has not
-  run.
-- No factory presets, no OpenFX port, no browser demo, no user guide.
+  onset detector's thresholds were set on synthetic spectra and synthesised
+  tracks, not on programme material through Resolume's FFT.
+- **The harness has run on this Mac's GPU and on CI's software renderer**
+  (`ci.yml`, green on the release commit); nothing has timed it elsewhere.
+- No factory presets and no OpenFX port. There is a [user
+  guide](https://stoatworks-labs.com/software/pattern/guide/) and a [browser
+  demo](https://pattern-demo.stoatworks-labs.com), which is a port rather than
+  the plugin.
+
+Found filming the release video, on a synthesised 125 BPM track through
+`pntest --wav` (the harness's own FFT, not Resolume's):
+
+- **A quiet band hears the leading edge of any sharp transient.** The detector
+  reads the first frame that contains an onset, and the first milliseconds of
+  a click are broadband, so a kick with a 1 ms attack wrote every channel until
+  each band's floor had learned the leak (about a second). The 1e-4 absolute
+  floor is far below such leakage. The video's instruments have soft attacks
+  and steep filters for that reason; the guide says so.
+- **A band holding a sustained instrument adapts to it.** With the bass under
+  the kick in bin 0, the kick failed the ratio in its own band and the next
+  band up wrote it from the leak, naming that band's peak bin.
+- **The tempo detector read the bar, not the beat**, on the track: 62 for 125
+  in three takes (100 on a syncopated cut), a straight kick-and-hats pulse
+  included. The `--detected` metronome checks still hold; the Detected beat was
+  cut from the video and replaced by the Manual source, and the guide records
+  the limitation. A second halving of the best lag at a 50 % score, tried and
+  reverted, did not change the reading.
 
 ## Installing
 
