@@ -3,7 +3,8 @@
 A tracker's pattern editor written by the music as it plays, as an FFGL
 **source** for Resolume Arena/Avenue. C++17/GLSL 4.10, CMake MODULE →
 universal `.bundle` (macOS) + Windows `.dll`. MIT. Released as v0.1.0 on
-2026-09-24; never loaded into Resolume on macOS.
+2026-09-24 and v0.1.1 on 2026-09-25 (the Detected tempo's octave fix); never
+loaded into Resolume on macOS.
 
 Read `AGENTS.md` before touching the row clock, the onset detector, the band
 split, or any tolerance in the harness.
@@ -37,10 +38,17 @@ split, or any tolerance in the harness.
   - `./build/pntest --prime` — loud audio already playing when the clip starts writes no false note
   - `./build/pntest --pitch` — a peak at bin j is the note the bin law predicts, both laws, folded and not
   - `./build/pntest --ring` — the next pass overwrites; a row with no onset is cleared, or kept with Keep Notes
-  - `./build/pntest --detected` — a metronome within ±1 BPM inside six seconds (measured: 3.0)
+  - `./build/pntest --detected` — a metronome within ±1 BPM inside six seconds (measured: 4.0)
+  - `./build/pntest --groove` — drum grooves rendered as audio (backbeat, kick-heavy, syncopated
+    kick and pluck at 80..170 BPM, the video's house groove) at the right metrical level by 4.0 s;
+    v0.1.0's detector (`legacyTempo`) must fail them
+  - `./build/pntest --tempo-wav track.wav --truth 125 [--from 4] [--fps 30] [--legacy]` — a real
+    file's detected tempo once a second (verify.sh runs the release video's soundtrack when the
+    backend checkout is present)
   - `./build/pntest --names` — no name over 16 characters, none duplicated
   - `./build/pntest --font` — the glyph table
-- The one check that reads pixels: `./build/pntest --grid` (640x360 and 320x180, Scale 1–4 and Auto)
+- The one check that reads pixels: `./build/pntest --grid` (640x360 and 320x180, Scale 1–4 and Auto);
+  `PNTEST_RENDERER=software` forces Apple's software renderer, which verify.sh also runs
 - Cost: `./build/pntest --bench`
 - No dead controls: `python3 tools/sweep.py` (`--size WxH`, `--jobs N`, `--binary PATH`)
 
@@ -55,6 +63,11 @@ Every check carries its negative control and asserts that it fails.
 - **The row phase is `base + ( t - anchor ) / T` in double**, re-anchored when
   the period changes, with a 1e-6 row allowance in the floor. Never accumulate
   it, never keep it in float: Resolume's clock is ~499 million ms.
+- **The tempo detector is three standardised registers, not the summed flux.** Low (<400 Hz),
+  mid, high (>5 kHz) by bin centre, fixed whatever Channels says; each smoothed, standardised and
+  weighted by its own periodicity; `S(T) = 0.5 R(T/2) + R(T) + R(2T)`; a prior picks the family, the
+  fastest level within 0.70 of the best is the beat; two readings in a row within 2 % publish.
+  Summing raw flux is what made v0.1.0 read 62 for 125. AGENTS.md has the numbers.
 - **Frame one primes**: the previous spectrum is set to the current one and each
   band's floor is seeded at an eighth of its level. A zero or reversed host
   time advances nothing.
@@ -87,9 +100,10 @@ Every check carries its negative control and asserts that it fails.
 - Never loaded into Resolume on macOS; no real audio has reached it in a host.
   The harness has run on this Mac's GPU and on CI's software renderer.
 - No phase lock to the host's `barPhase` (rate lock only).
-- The Detected tempo source read the bar (62) for a 125 BPM groove in the
-  release video; a quiet band hears the leading edge of a sharp transient. Both
-  in AGENTS.md's traps and the user guide.
+- A quiet band hears the leading edge of a sharp transient (AGENTS.md's traps,
+  the user guide). The Detected tempo's octave error on grooves is fixed in
+  v0.1.1; a breakbeat with ghost snares and an off-beat-bass groove at 80..90
+  BPM still read at the wrong level (printed by `--groove`, not asserted).
 - No presets, no OpenFX port. User guide in `docs/`, browser demo in `demo/`.
 
 ## Browser demo

@@ -14,28 +14,29 @@ after row `3F` the cursor wraps and the next pass overwrites the last.
 than captured from Resolume. Each channel column reads note, sample number and effect; the
 blue row is the cursor.*
 
-> **Before you rely on this:** released at **v0.1.0**, and honestly early. The tracker is
-> measured rather than asserted, by a harness that drives the real plugin class, and eight of
-> its nine check groups open no GL context at all: the row cursor sits on floor(t / T) mod 64
+> **Before you rely on this:** released at **v0.1.1**, and honestly early. The tracker is
+> measured rather than asserted, by a harness that drives the real plugin class, and nine of
+> its ten check groups open no GL context at all: the row cursor sits on floor(t / T) mod 64
 > on every one of 36,000 frames of a ten-minute run at 60 fps (and 30,000 at 50, 18,000 at 30)
 > from a host clock at 499,000,000 ms, with swing and across a tempo change; a burst in band k
 > writes exactly one note, in channel k, on the row current at that frame, at four and eight
 > channels under both bin laws; loud audio already playing when the clip starts writes no
 > false note in its first second; all 64 bins give the predicted note or `---` under Linear
 > and Log, folded and unfolded; the next pass clears, keeps and overwrites rows exactly; a
-> metronome is detected within 1 BPM by 3.00 s at four frame rates; and at 640 × 360 and
-> 320 × 180, at Scale 1 to 4 and Auto, every scaled block is one colour and every probed glyph
-> matches the font table bit for bit. Seven deliberate faults are shown to make those checks
-> fail, and a one-character change to the shipped shader fails 36 assertions. All 17 controls
-> are shown to change the picture. It has **never been loaded into Resolume on macOS**, and
-> **no real audio has reached it in a host**: the one host it has run in there is the fleet's
-> own test host, `oxbow`.
-> On Windows, a build of v0.1.0 loads, registers as a source and renders in Resolume Arena
-> 7.27.1, with all 23 host controls matching what the plugin declares — on software rendering
-> (win-lab, Mesa llvmpipe, no GPU), so that says nothing about a GPU. That box has no sound
-> device, so its 12 audio-driven controls were not exercised there, and the Manual BPM could
-> not be shown moving on the gate's still picture (it changes three digits in the header).
-> Try it on a spare layer before you put it in a show.
+> metronome is detected within 1 BPM by 4.00 s at four frame rates, and so are 45 drum grooves
+> rendered as audio from 80 to 170 BPM, at the right metrical level; and at 640 × 360 and 320
+> × 180, at Scale 1 to 4 and Auto, every scaled block is one colour and every probed glyph
+> matches the font table bit for bit. Eight deliberate faults are shown to make those checks
+> fail (one of them is v0.1.0's own tempo detector), and a one-character change to the shipped
+> shader fails 36 assertions. All 17 controls are shown to change the picture. It has **never
+> been loaded into Resolume on macOS**, and **no real audio has reached it in a host**: the
+> one host it has run in there is the fleet's own test host, `oxbow`. On Windows, a build of
+> v0.1.0 (the same code but for the tempo detector) loads, registers as a source and renders
+> in Resolume Arena 7.27.1, with all 23 host controls matching what the plugin declares — on
+> software rendering (win-lab, Mesa llvmpipe, no GPU), so that says nothing about a GPU. That
+> box has no sound device, so its 12 audio-driven controls were not exercised there, and the
+> Manual BPM could not be shown moving on the gate's still picture (it changes three digits in
+> the header). Try it on a spare layer before you put it in a show.
 >
 > This codebase was created with AI assistance, directed and reviewed by a human author.
 
@@ -256,22 +257,42 @@ Two consequences, both found filming the release video and both worth knowing:
 
 ## Detected tempo
 
-With Tempo Source on Detected the plugin builds an onset envelope at 100 Hz from the total
-flux, autocorrelates the last six seconds once a second over lags from 60 to 200 BPM, prefers
-the lag at half the best when it scores nearly as well, and reports the peak when it is
-trustworthy. The row clock follows the estimate, re-anchoring the phase each time it changes,
-and the header shows `?` until it has settled and `*` after.
+With Tempo Source on Detected the plugin works out the beat from the audio itself. It keeps
+three onset envelopes at 100 Hz, one each for the low end (below 400 Hz: kick, bass), the
+middle (400 Hz to 5 kHz: snare, clap, most pitched parts) and the top (hats, cymbals), and
+evens them out so a quiet clap counts as much as a loud kick. Once a second it looks at the
+last six seconds for the period that repeats best together with its subdivision and its
+grouping, and takes the fastest level that holds up: the beat rather than the half note, and
+the beat rather than the eighths. A reading is used only when the one before it agrees within
+2 %, so the first appears after about four seconds and a single stray reading never moves the
+clock. The row clock follows the estimate, re-anchoring the phase each time it changes, and
+the header shows `?` until it has settled and `*` after. The three registers are fixed: the
+Channels and Band Split controls do not change what the tempo detector hears.
 
-Measured: a metronome at 120 BPM (and 100, 150, at 24 to 60 fps) is found within ±1 BPM at
-3.00 s, the first moment the detector speaks, and held for twelve seconds, with the row clock
-running at the detected tempo over a host saying 77.
+Measured, through the offline harness's own FFT (not Resolume's):
 
-**Not measured on music, and on the release video's groove it was wrong.** A 125 BPM track
-with a kick on every beat, a clap on two and four and a bass figure turning every bar
-correlates best at the whole bar, and the detector read **62** for 125 in three takes, and 100
-on a syncopated cut (the row clock then ran at half speed). A straight kick-and-hats pulse read
-62 as well. Use Host or Manual for such material; treat Detected as a first release's estimate
-that has met a metronome and the harness's own drum loop.
+- A metronome at 120, 100 and 150 BPM, at 24 to 60 fps, is found within ±1 BPM at **4.00 s**
+  and held for twelve seconds, with the row clock running at the detected tempo over a host
+  saying 77.
+- **45 drum grooves rendered as audio** — kick on one and three with a clap on two and four
+  and hats on the eighths; the same with the clap and hats far quieter; a kick on the "and" of
+  two as well; a syncopated pluck over the top; each at 80, 90, 100, 110, 125, 140, 150, 160
+  and 170 BPM; and the release video's four-on-the-floor house groove at 115 to 135 — all
+  read within ±1 BPM of the right tempo (not its half or double) by 4.00 s and hold it, the
+  worst error after that 0.26 BPM.
+- The release video's own soundtrack reads 124.5 to 125.0 for its whole length at 30 and
+  60 fps.
+
+**v0.1.0 read the half note.** Version 0.1.0 summed all the audio into one envelope, where a
+loud kick outweighed the clap, and it read **62** for the video's 125 BPM groove, 160 for a
+backbeat at 80 and 200 for one at 100. v0.1.1 replaces it; if you set up a show with v0.1.0
+and switched to Host because of this, Detected is worth another try.
+
+**Still wrong, and printed by the harness rather than hidden:** a breakbeat with ghost snares
+and sixteenth hats reads double at 80 BPM and half from 140 to 170; a four-on-the-floor with
+an off-beat bass reads double at 80 and 90, because its eighths really are a pulse at twice
+the tempo. Nothing has been measured through Resolume's own FFT. For such material, and for
+anything the show depends on, use Host or Manual.
 
 ---
 
@@ -314,7 +335,8 @@ is Detected and nothing has been detected yet: the clock then runs on the host's
 120 if the host never said.
 
 **The cursor runs at half or double the beat.** Speed is not 6 (four rows a beat needs 6), or
-Detected has locked to the bar or the half beat. Use Host.
+Detected has read the music at another metrical level (a breakbeat, or an off-beat bass at a
+slow tempo; see Detected tempo). Use Host.
 
 **The screen is cropped.** Scale is fixed and larger than fits. Scale 0 is Auto.
 
@@ -345,8 +367,9 @@ audio reached the layer, and which tempo the clock is following.
   sample-rate call, 44.1 kHz when it never comes. The onset thresholds were set on synthetic
   spectra and a synthesised track through the harness's own FFT, whose normalisation is not
   Resolume's; Sensitivity is the hedge.
-- **Detected tempo has met a metronome, not music**, and on the release video's groove it read
-  the bar (62 for 125). See above.
+- **Detected tempo has met a metronome, rendered grooves and one synthesised track**, never
+  music through Resolume's FFT. It reads a breakbeat, and an off-beat bass at 80 to 90 BPM,
+  at the wrong level. See above.
 - **A quiet band hears the leading edge of any sharp transient**, and a band with a sustained
   instrument in it can miss a drum a neighbour hears. See The listening, exactly.
 - **Rate lock only.** Row 0 is where the clip started, not the host's downbeat: the FFGL

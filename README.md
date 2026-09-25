@@ -8,8 +8,10 @@
 > from a host clock at 499 million milliseconds (`pntest --timing`); a burst in
 > band *k* writes **exactly one** note, in channel *k*, on the row current at
 > that frame (`--onset`); loud audio already playing when the clip starts writes
-> **no false note** in its first second (`--prime`); a metronome is detected to
-> within **±1 BPM in 3.0 s** (`--detected`). Each check carries a negative
+> **no false note** in its first second (`--prime`); a metronome, and drum
+> grooves rendered as audio from 80 to 170 BPM, are detected to within
+> **±1 BPM at the right metrical level in 4.0 s** (`--detected`, `--groove`).
+> Each check carries a negative
 > control that must fail, and one does. Every one of the 17 controls is proven to
 > change the picture at two rasters, and the bundle registers, instantiates and
 > lights pixels under the fleet's oxbow host. **It has never been loaded into
@@ -137,7 +139,9 @@ used yet (see `AGENTS.md`).
 
 ## Status
 
-**v0.1.0, released 2026-09-24, and honestly early.**
+**v0.1.1, released 2026-09-25, and honestly early.** v0.1.1 fixes the Detected
+tempo source, which in v0.1.0 locked to half the real tempo on programme
+material (62 for a 125 BPM groove); nothing else changed.
 
 Verified, by measurement on this machine (Apple Silicon, macOS 26.4), with
 `tools/verify.sh` green:
@@ -162,9 +166,21 @@ Verified, by measurement on this machine (Apple Silicon, macOS 26.4), with
 - **The ring.** Rows written on pass 0 only are cleared on pass 1 (3 of 3), kept
   with Keep Notes on, rows written on both carry pass 1's note, a jump of 520
   rows clears the pattern. A pass that never clears fails.
-- **Detected tempo.** 120 BPM at 60 fps, 100 at 50, 150 at 60 and 120 at 24 fps
-  all within ±1 BPM by **3.00 s** and holding for twelve; the row clock follows
-  it over a host saying 77. A lag scaled by 1.1 reads 109.09 and never settles.
+- **Detected tempo, on a metronome.** 120 BPM at 60 fps, 100 at 50, 150 at 60
+  and 120 at 24 fps all within ±1 BPM by **4.00 s** and holding for twelve; the
+  row clock follows it over a host saying 77. A lag scaled by 1.1 reads 109.08
+  and never settles.
+- **Detected tempo, on grooves** (`--groove`). Drum grooves rendered as audio
+  and put through the harness's FFT — a backbeat (kick on 1 and 3, clap on 2
+  and 4, hats on the eighths), the same with the clap 12 dB and the hats 20 dB
+  down, a syncopated kick, and the video's syncopated pluck over a backbeat, at
+  80, 90, 100, 110, 125, 140, 150, 160 and 170 BPM, plus the release video's
+  house groove at 115–135 and four frame rates — all 45 read within ±1 BPM at
+  the right metrical level by **4.00 s** and hold for sixteen, the worst error
+  after settling 0.26 BPM. v0.1.0's detector, kept as the negative control,
+  fails 15 of the 45 (160 for 80, 200 for 100, 62.1 for the video's 125). The
+  release video's own soundtrack reads 124.5–125.0 at 30 fps and 60 fps from
+  4 s to the end, where v0.1.0 read 62 and 100 at 30 fps.
 - **The picture.** At 640×360 and 320×180, at Scale 1–4 and Auto, four and
   eight channels: every s×s block aligned to the plugin's origin is one colour
   (57,600 blocks at 640×360 Scale 1), every pixel outside the screen is the
@@ -217,11 +233,18 @@ Found filming the release video, on a synthesised 125 BPM track through
   the kick in bin 0, the kick failed the ratio in its own band and the next
   band up wrote it from the leak, naming that band's peak bin.
 - **The tempo detector read the bar, not the beat**, on the track: 62 for 125
-  in three takes (100 on a syncopated cut), a straight kick-and-hats pulse
-  included. The `--detected` metronome checks still hold; the Detected beat was
-  cut from the video and replaced by the Manual source, and the guide records
-  the limitation. A second halving of the best lag at a 50 % score, tried and
-  reverted, did not change the reading.
+  in three takes (100 on a syncopated cut). **Fixed in v0.1.1**: the raw summed
+  flux let the kick outweigh the clap, so the envelope repeated at the half
+  note. The detector now standardises three registers (low, mid, high) before
+  summing, scores each period with its grouping and subdivision, and takes the
+  fastest level that scores within 0.70 of the best; `AGENTS.md` has the
+  account. The video (made with v0.1.0) still shows the Manual source instead.
+- **What v0.1.1 still reads at the wrong level:** a breakbeat with ghost snares
+  and sixteenth hats (double at 80, half from 140 to 170, unsettled at 125;
+  right at 90–110), and a four-on-the-floor with an off-beat bass at 80 and 90
+  (read as 160 and 180: its eighths are a real pulse at twice the tempo; right
+  from 100 to 170). Both are measured by `--groove` and printed, not asserted.
+  Use Host or Manual for such material.
 
 ## Browser demo
 
@@ -262,7 +285,7 @@ line.
 
 ## Building and testing
 
-The offline harness drives the real plugin class. Eight of its nine check groups
+The offline harness drives the real plugin class. Nine of its ten check groups
 open **no GL context at all**, because the claims they make are claims about the
 tracker's published state and a rasteriser has no opinion about those:
 
@@ -271,7 +294,8 @@ tracker's published state and a rasteriser has no opinion about those:
     ./build/pntest --prime         # frame one, with loud audio already playing
     ./build/pntest --pitch         # the bin law's note, both laws, folded and not
     ./build/pntest --ring          # the next pass overwrites, clears or keeps
-    ./build/pntest --detected      # a metronome within +-1 BPM in 3 s
+    ./build/pntest --detected      # a metronome within +-1 BPM in 4 s
+    ./build/pntest --groove        # drum grooves as audio, 80..170 BPM, the right metrical level
     ./build/pntest --grid          # and the one check that reads a rasteriser
     ./build/pntest --bench         # 720p through 4K
     ./build/pntest --out /tmp/f.png --size 1920x1080 --frames 300 --audio beats --host-bpm 125

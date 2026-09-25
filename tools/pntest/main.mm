@@ -18,6 +18,13 @@
 	                or kept with Keep Notes on
 	    --detected  a metronome at 120 (and 100, 150) BPM is detected within
 	                +-1 BPM inside six seconds
+	    --groove    drum grooves rendered as AUDIO through the FFT -- backbeat,
+	                kick-heavy, syncopated kick, syncopated pluck across 80..170
+	                BPM, the release video's house groove at 115..135 -- are
+	                detected within +-1 BPM at the right metrical level inside
+	                six seconds; v0.1.0's detector must fail the same set
+	    --tempo-wav f.wav --truth N [--from S] [--fps N] [--legacy]
+	                the detected tempo of a real file, once a second
 	    --names     no parameter name over FFGL's 16 characters, none duplicated
 	    --font      the glyph table has every character the screen draws
 	    --list      the fleet's parameter listing, for tools/sweep.py
@@ -39,8 +46,8 @@
 	The clock, the ring, the onsets, the pitches and the detected tempo are
 	claims about `source/tracker/`, so they are measured on the tracker's
 	published state with no rasteriser in the room: `--timing`, `--onset`,
-	`--prime`, `--pitch`, `--ring`, `--detected`, `--names` and `--font` open
-	no GL context at all and give the same answer on a GPU-less runner by
+	`--prime`, `--pitch`, `--ring`, `--detected`, `--groove`, `--names` and
+	`--font` open no GL context at all and give the same answer on a GPU-less runner by
 	construction. `--grid` is the one check that reads pixels, and what it
 	asserts is a property no rasteriser can bend: at Scale s every s x s block
 	of the output aligned to the plugin's own origin is one colour, the blocks
@@ -88,6 +95,7 @@
 #include <complex>
 #include <csignal>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <functional>
@@ -188,6 +196,24 @@ bool writePng( const std::string& path, int width, int height, const std::vector
 //---------------------------------------------------------------------------
 CGLContextObj createContext()
 {
+	// PNTEST_RENDERER=software asks for Apple's software renderer outright,
+	// which is what a GPU-less CI runner falls back to.
+	const char* renderer = std::getenv( "PNTEST_RENDERER" );
+	if( renderer != nullptr && std::strcmp( renderer, "software" ) == 0 )
+	{
+		CGLPixelFormatAttribute sw[] = { kCGLPFAOpenGLProfile, (CGLPixelFormatAttribute)kCGLOGLPVersion_3_2_Core,
+										 kCGLPFARendererID, (CGLPixelFormatAttribute)kCGLRendererGenericFloatID,
+										 kCGLPFAColorSize, (CGLPixelFormatAttribute)24, (CGLPixelFormatAttribute)0 };
+		CGLPixelFormatObj       pix  = nullptr;
+		GLint                   npix = 0;
+		CGLContextObj           ctx  = nullptr;
+		if( CGLChoosePixelFormat( sw, &pix, &npix ) != kCGLNoError || pix == nullptr ||
+			CGLCreateContext( pix, nullptr, &ctx ) != kCGLNoError )
+			return nullptr;
+		CGLSetCurrentContext( ctx );
+		std::printf( "renderer: %s\n", reinterpret_cast< const char* >( glGetString( GL_RENDERER ) ) );
+		return ctx;
+	}
 	CGLPixelFormatAttribute attrs[] = { kCGLPFAOpenGLProfile, (CGLPixelFormatAttribute)kCGLOGLPVersion_3_2_Core,
 										kCGLPFAAccelerated, kCGLPFAColorSize, (CGLPixelFormatAttribute)24,
 										(CGLPixelFormatAttribute)0 };
@@ -1343,6 +1369,382 @@ int runDetected()
 }
 
 //---------------------------------------------------------------------------
+// --groove: the detected tempo on programme-shaped grooves, not a metronome
+//---------------------------------------------------------------------------
+namespace
+{
+/// An RBJ-cookbook biquad, direct form I. Two in series stand in for the
+/// fourth-order Butterworths the release video's track used.
+struct Biquad
+{
+	double b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0, x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+
+	static Biquad make( int type, double hz, double q, double rate )
+	{
+		const double w = 2.0 * M_PI * hz / rate, c = std::cos( w ), alpha = std::sin( w ) / ( 2.0 * q );
+		double       nb0, nb1, nb2;
+		if( type == 0 )// low-pass
+			nb0 = ( 1 - c ) / 2, nb1 = 1 - c, nb2 = ( 1 - c ) / 2;
+		else if( type == 1 )// high-pass
+			nb0 = ( 1 + c ) / 2, nb1 = -( 1 + c ), nb2 = ( 1 + c ) / 2;
+		else// band-pass, 0 dB peak
+			nb0 = alpha, nb1 = 0, nb2 = -alpha;
+		const double a0 = 1 + alpha;
+		Biquad       f;
+		f.b0 = nb0 / a0, f.b1 = nb1 / a0, f.b2 = nb2 / a0, f.a1 = -2 * c / a0, f.a2 = ( 1 - alpha ) / a0;
+		return f;
+	}
+	double step( double x )
+	{
+		const double y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+		x2 = x1, x1 = x, y2 = y1, y1 = y;
+		return y;
+	}
+};
+
+/// A drum groove rendered as audio, so it reaches the plugin the way music
+/// does: through a 2048-point FFT folded into 64 bins (the `--wav` path),
+/// with the leakage, the window's smear and the frame grid's jitter that
+/// the one-frame bursts of `Synth` do not have. Every sample is a pure
+/// function of the arguments; the noise is an integer hash.
+struct Groove
+{
+	enum Kind
+	{
+		Backbeat, ///< kick on 1 and 3, clap on 2 and 4, hats on the eighths
+		KickHeavy,///< the same with the clap 12 dB and the hats 20 dB down
+		SyncKick, ///< a kick on the "and" of 2 as well
+		Arp,      ///< the backbeat under the video's first-cut pluck: 0,2,3,5,7 of each eight sixteenths
+		House,    ///< the release video's groove: kick every beat, off-beat bass, clap, hats, ticks, pluck
+		Break,    ///< kick 1, "a" of 1, "and" of 3; snare 2 and 4 with ghosts; sixteenth hats
+		Count
+	};
+	static const char* name( int k )
+	{
+		static const char* const names[] = { "backbeat", "kick-heavy", "syncopated kick", "syncopated pluck", "house (the video's)", "breakbeat" };
+		return names[ k ];
+	}
+
+	static constexpr double kRate = 48000.0;
+
+	static double noise( uint32_t i, uint32_t salt ) { return jitter( static_cast< int >( i ), 7, static_cast< int >( salt ) ); }
+	static double env( double t, double attack, double decay ) { return std::min( 1.0, t / attack ) * std::exp( -t / decay ); }
+
+	static std::vector< double > kick( double amp )
+	{
+		std::vector< double > v( static_cast< size_t >( 0.30 * kRate ) );
+		Biquad                l1 = Biquad::make( 0, 300, 0.707, kRate ), l2 = l1;
+		double                phase = 0.0;
+		for( size_t i = 0; i < v.size(); ++i )
+		{
+			const double t = i / kRate;
+			phase += 2.0 * M_PI * ( 48.0 + 62.0 * std::exp( -t / 0.03 ) ) / kRate;
+			v[ i ] = l2.step( l1.step( amp * env( t, 0.004, 0.09 ) * std::sin( phase ) ) );
+		}
+		return v;
+	}
+	static std::vector< double > filtered( double seconds, double attack, double decay, int type, double hz, double q,
+										   double amp, uint32_t salt )
+	{
+		std::vector< double > v( static_cast< size_t >( seconds * kRate ) );
+		Biquad                f1 = Biquad::make( type, hz, q, kRate ), f2 = f1;
+		for( size_t i = 0; i < v.size(); ++i )
+			v[ i ] = f2.step( f1.step( amp * env( i / kRate, attack, decay ) * noise( static_cast< uint32_t >( i ), salt ) ) );
+		return v;
+	}
+	static std::vector< double > tone( double hz, double seconds, double attack, double decay, double amp )
+	{
+		std::vector< double > v( static_cast< size_t >( seconds * kRate ) );
+		for( size_t i = 0; i < v.size(); ++i )
+			v[ i ] = amp * env( i / kRate, attack, decay ) * std::sin( 2.0 * M_PI * hz * i / kRate );
+		return v;
+	}
+
+	/// `seconds` of the groove at `bpm`, as a mono WAV the harness's FFT reads.
+	static Wav render( int kind, double bpm, double seconds )
+	{
+		struct Part
+		{
+			std::vector< double > sound;
+			std::vector< int >    steps;
+			double                gain = 1.0;
+		};
+		const bool   heavy = kind == KickHeavy, house = kind == House;
+		const double kickAmp = house ? 0.6 : 0.9, clapAmp = house ? 0.4 : ( heavy ? 0.3 : 1.2 );
+		const double hatAmp  = heavy ? 0.035 : 0.35;
+		std::vector< Part > parts;
+		const auto clap = filtered( 0.25, 0.003, 0.06, 2, 2450.0, 1.0, clapAmp * 1.7, 11 );
+		const auto hat  = filtered( 0.08, 0.002, 0.025, 1, 7000.0, 0.707, hatAmp * 1.7, 13 );
+		const auto hatOff = filtered( 0.11, 0.002, 0.05, 1, 7000.0, 0.707, hatAmp * 1.7 * ( house ? 0.77 : 0.6 ), 17 );
+		const std::vector< int > eighthsOn = { 0, 4, 8, 12 }, eighthsOff = { 2, 6, 10, 14 };
+		switch( kind )
+		{
+		case Backbeat:
+		case KickHeavy:
+		case Arp:
+			parts.push_back( { kick( kickAmp ), { 0, 8 } } );
+			parts.push_back( { clap, { 4, 12 } } );
+			break;
+		case SyncKick:
+			parts.push_back( { kick( kickAmp ), { 0, 6, 8 } } );
+			parts.push_back( { clap, { 4, 12 } } );
+			break;
+		case House:
+			parts.push_back( { kick( kickAmp ), { 0, 4, 8, 12 } } );
+			parts.push_back( { tone( 55.0, 0.2, 0.006, 0.25, 0.36 ), eighthsOff } );
+			parts.push_back( { clap, { 4, 12 } } );
+			parts.push_back( { filtered( 0.03, 0.002, 0.008, 1, 14000.0, 0.707, 0.34 * 1.7, 19 ), { 1, 3, 5, 7, 9, 11, 13, 15 } } );
+			break;
+		case Break:
+			parts.push_back( { kick( kickAmp ), { 0, 3, 10 } } );
+			parts.push_back( { clap, { 4, 12 } } );
+			parts.push_back( { clap, { 7, 15 }, 0.3 } );
+			parts.push_back( { hatOff, { 1, 3, 5, 7, 9, 11, 13, 15 } } );
+			break;
+		default:
+			break;
+		}
+		parts.push_back( { hat, eighthsOn } );
+		if( kind != Break )
+			parts.push_back( { hatOff, eighthsOff } );
+		else
+			parts.push_back( { hat, eighthsOff } );
+
+		Wav wav;
+		wav.rate = kRate;
+		wav.mono.assign( static_cast< size_t >( seconds * kRate ), 0.0f );
+		std::vector< double > mix( wav.mono.size(), 0.0 );
+		const double          sixteenth = 15.0 / bpm;
+		const int             bars      = static_cast< int >( seconds / ( 16 * sixteenth ) ) + 1;
+		auto                  put       = [ & ]( const std::vector< double >& s, double at, double gain ) {
+            const size_t i0 = static_cast< size_t >( std::llround( at * kRate ) );
+            for( size_t i = 0; i < s.size() && i0 + i < mix.size(); ++i )
+                mix[ i0 + i ] += gain * s[ i ];
+		};
+		for( int bar = 0; bar < bars; ++bar )
+			for( const Part& part : parts )
+				for( int s : part.steps )
+					put( part.sound, ( bar * 16 + s ) * sixteenth, part.gain );
+		if( kind == Arp || kind == House )
+		{
+			// The pluck: sines on bin centres, so each note sits in one bin.
+			static const double arpHz[] = { 1875.0, 2625.0, 2250.0, 3000.0, 3375.0 };
+			const std::vector< int > gate = kind == Arp ? std::vector< int >{ 0, 2, 3, 5, 7, 8, 10, 11, 13, 15 }
+														: std::vector< int >{ 1, 3, 5, 7, 9, 11, 13, 15 };
+			int note = 0;
+			for( int bar = 0; bar < bars; ++bar )
+				for( int s : gate )
+					put( tone( arpHz[ note++ % 5 ], 0.15, 0.004, 0.05, kind == Arp ? 0.45 : 0.30 ), ( bar * 16 + s ) * sixteenth, 1.0 );
+		}
+		double peak = 1e-9;
+		for( double v : mix )
+			peak = std::max( peak, std::fabs( v ) );
+		for( size_t i = 0; i < mix.size(); ++i )
+			wav.mono[ i ] = static_cast< float >( 0.89 * mix[ i ] / peak );
+		return wav;
+	}
+};
+
+struct TempoRun
+{
+	double settledAt = -1.0;///< the first frame after which every frame reads within +-1
+	double finalBpm  = 0.0;
+	double share = 1.0, faster = 0.0;///< the true level's lowest share of its family's best, and double time's highest
+	double worst     = 0.0;///< the largest |error| after settling
+	std::vector< double > perSecond;
+};
+
+/// A WAV through the plugin's audio input, with Tempo Source = Detected and a
+/// host saying something else. Reads the detected tempo on every frame.
+TempoRun tempoOf( const Wav& wav, double truth, double fps, double seconds, bool legacy )
+{
+	PatternPlugin p;
+	p.ForceSecondsClock();
+	p.SetSampleRate( static_cast< unsigned int >( wav.rate ) );
+	p.SetFloatParameter( PT_TEMPO_SOURCE, 1.0f );
+	p.SetBeatInfo( 77.0f, 0.0f );
+	p.StateForTest().debug.legacyTempo = legacy;
+	TempoRun run;
+	float    bins[ kBins ];
+	const int frames = static_cast< int >( seconds * fps );
+	int       lastWrong = -1;
+	std::vector< double > readings( static_cast< size_t >( frames ) );
+	for( int f = 0; f < frames; ++f )
+	{
+		wav.bins( ( f + 1 ) / fps, bins );
+		inject( p, bins );
+		p.Advance( f / fps );
+		const double bpm    = p.State().TempoSettled() ? p.State().DetectedBpm() : 0.0;
+		readings[ static_cast< size_t >( f ) ] = bpm;
+		if( f >= static_cast< int >( 3.0 * fps ) && p.State().TempoSettled() )
+			for( int i = 0; i < p.State().TempoMembers(); ++i )
+			{
+				// The member at the true tempo, and the one at twice it.
+				const double b = p.State().TempoMemberBpm( i ), share = p.State().TempoMemberShare( i );
+				if( std::fabs( b / truth - 1.0 ) < 0.02 )
+					run.share = std::min( run.share, share );
+				else if( std::fabs( b / truth - 2.0 ) < 0.04 )
+					run.faster = std::max( run.faster, share );
+			}
+		if( !( std::fabs( bpm - truth ) <= 1.0 ) )
+			lastWrong = f;
+		if( f > 0 && std::floor( f / fps ) != std::floor( ( f - 1 ) / fps ) )
+			run.perSecond.push_back( bpm );
+	}
+	run.finalBpm = readings.back();
+	if( lastWrong < frames - 1 )
+	{
+		run.settledAt = ( lastWrong + 1 ) / fps;
+		for( int f = lastWrong + 1; f < frames; ++f )
+			run.worst = std::max( run.worst, std::fabs( readings[ static_cast< size_t >( f ) ] - truth ) );
+	}
+	return run;
+}
+} // namespace
+
+int runGroove()
+{
+	std::printf( "detected tempo on grooves: audio through the plugin's input, Tempo Source = Detected, host at 77\n"
+				 "(16 s each at 60 fps; settled = within +-1 BPM from then to the end; allowed 6 s)\n\n" );
+	constexpr double kSeconds = 16.0, kAllowed = 6.0;
+	struct Case
+	{
+		int    kind;
+		double bpm, fps;
+	};
+	std::vector< Case > cases;
+	const double tempos[] = { 80, 90, 100, 110, 125, 140, 150, 160, 170 };
+	for( int kind : { Groove::Backbeat, Groove::KickHeavy, Groove::SyncKick, Groove::Arp } )
+		for( double bpm : tempos )
+			cases.push_back( { kind, bpm, 60.0 } );
+	for( double bpm : { 115.0, 120.0, 125.0, 130.0, 135.0 } )
+		cases.push_back( { Groove::House, bpm, 60.0 } );
+	for( double fps : { 24.0, 30.0, 50.0 } )
+		cases.push_back( { Groove::Backbeat, 125.0, fps } );
+	cases.push_back( { Groove::House, 125.0, 30.0 } );
+
+	double latest = 0.0, worst = 0.0, minShare = 1.0, maxFaster = 0.0;
+	int    legacyFailed = 0;
+	std::vector< std::string > legacyFails;
+	for( const Case& c : cases )
+	{
+		const Wav      wav = Groove::render( c.kind, c.bpm, kSeconds );
+		const TempoRun run = tempoOf( wav, c.bpm, c.fps, kSeconds, false );
+		const TempoRun old = tempoOf( wav, c.bpm, c.fps, kSeconds, true );
+		const bool     ok  = run.settledAt >= 0.0 && run.settledAt <= kAllowed;
+		Check( ok, std::string( Groove::name( c.kind ) ) + " at " + F( c.bpm, 0 ) + " BPM, " + F( c.fps, 0 ) + " fps: reads " +
+					   F( run.finalBpm, 2 ) + ", settled by " + ( run.settledAt >= 0.0 ? F( run.settledAt, 2 ) + " s" : "never" ) +
+					   " (worst after " + F( run.worst, 2 ) + "; the beat's share " + F( run.share, 2 ) + ", double time's " + F( run.faster, 2 ) +
+					   "; v0.1.0 read " + F( old.finalBpm, 2 ) + ")" );
+		if( ok )
+		{
+			latest    = std::max( latest, run.settledAt );
+			worst     = std::max( worst, run.worst );
+			minShare  = std::min( minShare, run.share );
+			maxFaster = std::max( maxFaster, run.faster );
+		}
+		if( !( old.settledAt >= 0.0 && old.settledAt <= kAllowed ) )
+		{
+			++legacyFailed;
+			legacyFails.push_back( std::string( Groove::name( c.kind ) ) + " " + F( c.bpm, 0 ) + "->" + F( old.finalBpm, 1 ) );
+		}
+	}
+	std::printf( "\n  every groove: settled by %.2f s at the latest, worst error after settling %.2f BPM\n", latest, worst );
+	std::printf( "  the level margins: every true beat scored >= %.3f of its family's best, every double-time\n"
+				 "  impostor <= %.3f, either side of the ratio %.2f\n", minShare, maxFaster, kTempoLevelRatio );
+
+	// And it reaches the clock and the picture: the row clock runs at the
+	// detected tempo, not the host's 77, and the header says so with a '*'.
+	{
+		const Wav     wav = Groove::render( Groove::House, 125.0, 8.0 );
+		PatternPlugin p;
+		p.ForceSecondsClock();
+		p.SetSampleRate( 48000 );
+		p.SetFloatParameter( PT_TEMPO_SOURCE, 1.0f );
+		p.SetBeatInfo( 77.0f, 0.0f );
+		float bins[ kBins ];
+		for( int f = 0; f < 8 * 30; ++f )
+		{
+			wav.bins( ( f + 1 ) / 30.0, bins );
+			inject( p, bins );
+			p.Advance( f / 30.0 );
+		}
+		const Screen screen = p.BuildScreen();
+		std::string  header;
+		for( int c = 0; c < screen.cols; ++c )
+			header += static_cast< char >( screen.At( c, 0 ).glyph );
+		Check( std::fabs( p.State().Bpm() - 125.0 ) <= 1.0 && header.find( "BPM 125*" ) != std::string::npos,
+			   "the row clock follows it (" + F( p.State().Bpm(), 2 ) + " BPM) and the header reads \"" +
+				   header.substr( 0, header.find_last_not_of( ' ' ) + 1 ) + "\"" );
+	}
+
+	std::printf( "\n  measured, NOT asserted (AGENTS.md: metres this detector reads ambiguously):\n" );
+	auto measure = [ & ]( int kind, double bpm ) {
+		const TempoRun run = tempoOf( Groove::render( kind, bpm, kSeconds ), bpm, 60.0, kSeconds, false );
+		std::printf( "       %-20s at %3.0f BPM reads %6.2f%s\n", Groove::name( kind ), bpm, run.finalBpm,
+					 run.settledAt >= 0.0 && run.settledAt <= kAllowed ? "" : "  (not within +-1 by 6 s)" );
+	};
+	for( double bpm : tempos )
+		measure( Groove::Break, bpm );
+	for( double bpm : { 80.0, 90.0, 100.0, 150.0, 160.0, 170.0 } )
+		measure( Groove::House, bpm );
+
+	std::printf( "\n  negative control -- v0.1.0's detector (legacyTempo) must FAIL:\n" );
+	Check( legacyFailed > 0, "v0.1.0's detector fails " + std::to_string( legacyFailed ) + " of " + std::to_string( cases.size() ) + " grooves" );
+	{
+		std::string list;
+		for( size_t i = 0; i < legacyFails.size(); ++i )
+			list += ( i ? ", " : "" ) + legacyFails[ i ];
+		std::printf( "       %s\n", list.c_str() );
+	}
+	{
+		const TempoRun old = tempoOf( Groove::render( Groove::House, 125.0, kSeconds ), 125.0, 30.0, kSeconds, true );
+		Check( !( old.settledAt >= 0.0 && old.settledAt <= kAllowed ),
+			   "and on the release video's groove at 125 BPM, 30 fps it reads " + F( old.finalBpm, 2 ) + ", not 125" );
+	}
+	return failures == 0 ? 0 : 1;
+}
+
+/// `--tempo-wav f.wav --truth N [--fps N] [--from S]`: the detected tempo of a
+/// real file, once a second; with --truth, every reading from --from on must be
+/// within +-1 BPM. The release video's soundtrack is the fixture verify.sh uses
+/// when the backend checkout is present.
+int runTempoWav( const std::string& path, double truth, double fps, double from, bool legacy )
+{
+	Wav         wav;
+	std::string error;
+	if( !wav.load( path, error ) )
+	{
+		std::printf( "%s\n", error.c_str() );
+		return 2;
+	}
+	const double seconds = wav.mono.size() / wav.rate;
+	const TempoRun run   = tempoOf( wav, truth > 0 ? truth : 120.0, fps, seconds, legacy );
+	std::printf( "detected tempo of %s (%.1f s at %.0f Hz, %.0f fps%s), one reading a second:\n", path.c_str(), seconds, wav.rate, fps,
+				 legacy ? ", v0.1.0's detector" : "" );
+	int bad = 0, counted = 0;
+	for( size_t i = 0; i < run.perSecond.size(); ++i )
+	{
+		const double t = static_cast< double >( i + 1 );
+		std::printf( "%s%6.2f", i % 12 == 0 ? "\n  " : " ", run.perSecond[ i ] );
+		if( truth > 0 && t >= from )
+		{
+			++counted;
+			if( !( std::fabs( run.perSecond[ i ] - truth ) <= 1.0 ) )
+				++bad;
+		}
+	}
+	std::printf( "\n" );
+	if( truth > 0 )
+	{
+		Check( counted > 0 && bad == 0, std::to_string( counted - bad ) + " of " + std::to_string( counted ) + " readings from " + F( from, 0 ) +
+											" s within +-1 of " + F( truth, 1 ) + " BPM" );
+		return failures == 0 ? 0 : 1;
+	}
+	return 0;
+}
+
+//---------------------------------------------------------------------------
 // --names, --list, --font
 //---------------------------------------------------------------------------
 int runNames()
@@ -2089,15 +2491,27 @@ int main( int argc, char** argv )
 	std::map< std::string, std::function< int() > > checks = {
 		{ "--timing", runTiming }, { "--onset", runOnset },       { "--prime", runPrime }, { "--pitch", runPitch },
 		{ "--ring", runRing },     { "--detected", runDetected }, { "--names", runNames }, { "--list", runList },
+		{ "--groove", runGroove },
 		{ "--font", runFont },     { "--grid", runGrid },         { "--bench", runBench },
 	};
 
+	std::string tempoWav;
+	double      truth = 0.0, from = 4.0;
+	bool        legacy = false;
 	for( int a = 1; a < argc; ++a )
 	{
 		const std::string arg = argv[ a ];
 		if( checks.count( arg ) )
 			return checks[ arg ]();
-		if( arg == "--out" && a + 1 < argc )
+		if( arg == "--tempo-wav" && a + 1 < argc )
+			tempoWav = argv[ ++a ];
+		else if( arg == "--truth" && a + 1 < argc )
+			truth = std::atof( argv[ ++a ] );
+		else if( arg == "--from" && a + 1 < argc )
+			from = std::atof( argv[ ++a ] );
+		else if( arg == "--legacy" )
+			legacy = true;
+		else if( arg == "--out" && a + 1 < argc )
 			o.outPath = argv[ ++a ];
 		else if( arg == "--size" && a + 1 < argc )
 			std::sscanf( argv[ ++a ], "%dx%d", &o.width, &o.height );
@@ -2141,6 +2555,8 @@ int main( int argc, char** argv )
 		}
 	}
 
+	if( !tempoWav.empty() )
+		return runTempoWav( tempoWav, truth, o.fps, from, legacy );
 	if( o.pipe )
 	{
 		if( !framesGiven )
@@ -2154,8 +2570,9 @@ int main( int argc, char** argv )
 		return runOut( o );
 	}
 
-	std::printf( "usage: pntest --timing | --onset | --prime | --pitch | --ring | --detected\n"
+	std::printf( "usage: pntest --timing | --onset | --prime | --pitch | --ring | --detected | --groove\n"
 				 "              --names | --list | --font | --grid | --bench\n"
+				 "       pntest --tempo-wav f.wav [--truth BPM] [--from S] [--fps N] [--legacy]\n"
 				 "       pntest --out f.png [--size WxH] [--frames N] [--fps N] [--audio PRESET]\n"
 				 "              [--audio-bpm N] [--audio-until S] [--host-bpm N] [--set Name=value ...]\n"
 				 "       pntest --pipe [--size WxH | --width W --height H] [--fps N] [--frames N]\n"

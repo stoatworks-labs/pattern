@@ -80,13 +80,42 @@
 
 	## Detected tempo
 
-	The total flux is resampled onto a 100 Hz grid and, once a second, the
-	autocorrelation of the last six seconds is taken over the lags of 60 to
-	200 BPM. The best lag wins, a lag at half of it is preferred when it
-	scores at least 70 % as well (a metronome at 120 correlates equally at
-	60), and the peak is refined by a parabola through its neighbours. The
-	result is used only once the peak correlation is clear; until then, and
-	with too little history, the host's tempo stands in.
+	The onset envelope is kept in three registers rather than as one sum: LOW
+	(bin centres below 400 Hz under the bin law: kick, bass), MID (400 Hz to
+	5 kHz: snare, clap, most pitched parts) and HIGH (above: hats, ticks), each
+	its own half-wave-rectified flux, resampled onto a 100 Hz grid. Once a
+	second, over the last six seconds (from three), each register is smoothed
+	(a Gaussian of 20 ms, which covers the one-frame jitter of an onset on a
+	60 fps grid), standardised to zero mean and unit variance, weighted by
+	how periodic it is on its own (its best autocorrelation at periods of
+	0.3 to 2 s, clamped at zero, so a register holding only noise drops out) and
+	by 1, 1 and 0.5, and summed. Standardising is the fix for v0.1.0's octave
+	error: on the raw sum the kick's flux dwarfed the clap's, the envelope
+	repeated at the half note, and the detector read 62 for 125.
+
+	The combined envelope's autocorrelation R is then scored as a pulse with
+	its grouping and, at half weight, its subdivision:
+
+	    S( T ) = 0.5 R( T / 2 ) + R( T ) + R( 2 T )
+
+	The best S under a log-Gaussian prior around 120 BPM (one octave wide)
+	picks the FAMILY of periods, which rules out the 4/3 and 5/4 relatives a
+	dense groove also correlates at. The metrical LEVEL within the family
+	(x1/4 .. x4 inside 60..200 BPM) is the FASTEST member whose S is at least
+	0.70 of the family's best, with no prior: a half-note period scores well
+	because its subdivision is the beat, but so does the beat, and the beat is
+	faster; an eighth-note period loses because its own subdivision, the
+	sixteenth, is mostly empty. A pure pulse scores 0.8 of its half-tempo
+	relative by construction; over every reading of `pntest --groove` the true
+	beat scored at least 0.737 of its family's best and the double-time
+	impostor at most 0.672. The lag is refined by a parabola on the peak of R
+	at the largest multiple of it that fits (up to four), divided back down.
+	A reading is published only when the one before it agrees within 2 %, so
+	the first tempo appears at four seconds and a new one needs two readings
+	in a row: a single short-window octave slip never re-anchors the clock.
+	Until then, or while R at the chosen lag is under 0.2, the host's tempo
+	stands in. `debug.legacyTempo` runs v0.1.0's
+	detector, and `pntest --groove` requires it to fail.
 
 	## VU
 
@@ -123,6 +152,7 @@ struct TrackerDebug
 	bool   noPrime    = false;///< the detector starts from zero on frame one
 	bool   noClear    = false;///< a new pass never clears a row
 	double lagBias    = 0.0;  ///< the detected lag scaled by (1 + bias)
+	bool   legacyTempo = false;///< v0.1.0's detector: the raw summed flux, the best lag, a half at 70 %
 	bool   levelDetector = false;///< fires on level, not change: no memory, no rising-edge test
 	double detuneSemitones = 0.0;///< every pitch read this many semitones off
 };
@@ -151,6 +181,14 @@ constexpr int    kTempoWindow    = 600; ///< samples: six seconds
 constexpr int    kTempoLagMin    = 30;  ///< 200 BPM
 constexpr int    kTempoLagMax    = 100; ///< 60 BPM
 constexpr double kTempoSettleR   = 0.2; ///< normalised peak correlation to trust
+constexpr int    kTempoBands     = 3;   ///< low, mid, high registers
+constexpr double kTempoLowHz     = 400.0; ///< bin centres below: the low register
+constexpr double kTempoHighHz    = 5000.0;///< bin centres at or above: the high register
+constexpr double kTempoLevelRatio = 0.70;///< the fastest level scoring this share of the best wins
+constexpr double kTempoPriorBpm  = 120.0;///< the family prior's centre
+constexpr double kTempoPriorOct  = 1.0; ///< and its width, in octaves
+constexpr int    kTempoMaxLag    = 302; ///< samples of autocorrelation kept (3 s)
+constexpr double kTempoAgree     = 0.02;///< two readings in a row within this ratio publish
 
 class Tracker
 {
@@ -174,6 +212,13 @@ public:
 	double  Period() const { return mPeriod; }
 	double  Bpm() const { return mBpm; }
 	double  DetectedBpm() const { return mDetectedBpm; }
+	double  TempoPeakR() const { return mPeakR; }
+	/// The last detection's family, for the harness: each member's tempo and
+	/// its score as a share of the family's best. The level chosen is the
+	/// fastest with a share of at least kTempoLevelRatio.
+	int     TempoMembers() const { return mMemberCount; }
+	double  TempoMemberBpm( int i ) const { return mMemberBpm[ i ]; }
+	double  TempoMemberShare( int i ) const { return mMemberShare[ i ]; }
 	bool    TempoSettled() const { return mDetectedBpm > 0.0; }
 	double  RawPhase() const { return mRawPhase; }
 	int     BandEdge( int k ) const { return mEdges[ k ]; }
@@ -190,8 +235,9 @@ private:
 	void   ReanchorIfNeeded( double seconds );
 	void   AdvanceRows( double seconds );
 	void   Listen( double seconds, const double* m, double dt );
-	void   FeedTempo( double seconds, double onset );
+	void   FeedTempo( double seconds, const double* bandFlux );
 	void   DetectTempo();
+	void   DetectTempoLegacy( int n );
 	void   ClearRow( int row );
 
 	TrackerSettings mSettings;
@@ -226,12 +272,17 @@ private:
 	double mNow = 0.0;
 
 	// The tempo detector.
-	double  mEnv[ 1024 ]   = {};
+	int     mTempoBand[ bands::kBins ] = {};///< each bin's register, 0..2
+	double  mEnv[ kTempoBands ][ 1024 ] = {};
 	int64_t mEnvIndex      = -1;///< last grid index written
 	double  mEnvOrigin     = 0.0;
 	int64_t mLastDetectSec = -1;
 	double  mDetectedBpm   = 0.0;
+	double  mCandidateBpm  = 0.0;///< the last reading, published once the next agrees
 	double  mPeakR         = 0.0;
+	int     mMemberCount   = 0;
+	double  mMemberBpm[ 5 ]   = {};
+	double  mMemberShare[ 5 ] = {};
 };
 
 } // namespace pattern

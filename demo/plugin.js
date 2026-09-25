@@ -27,8 +27,10 @@
  *   `base + ( t - anchor ) / T` in double with the 1e-6 row allowance, swing,
  *   the ring that clears a row as it is entered, the spectral-flux onset
  *   detector primed on frame one and seeded at an eighth of the level, the
- *   refractory, the `Cxx` volume law, the autocorrelation tempo detector with
- *   its half-lag preference and parabolic refinement, the VU meters falling one
+ *   refractory, the `Cxx` volume law, the tempo detector (three standardised
+ *   registers, a pulse scored with its grouping and subdivision, the fastest
+ *   level within 0.70 of the best, two readings in a row to publish, parabolic
+ *   refinement), the VU meters falling one
  *   step every 20 ms), `Screen` (the 6 × 8 cell grid: counters, VU rectangles,
  *   the pattern rows), `LayoutFor` (the integer scale and origin), the three
  *   palettes in `Render.cpp`, every `Controls.h` conversion, `ToOption` and
@@ -102,9 +104,10 @@
  * the cursor on floor( t / T ) mod 64 from a host clock at 499 million ms, one
  * note per onset in the right channel on the right row, no false note on frame
  * one, the pitch the bin law predicts, the ring, a detected tempo within
- * ±1 BPM in 3 s and every glyph on the whole-pixel grid are checked by
- * `pntest --timing`, `--onset`, `--prime`, `--pitch`, `--ring`, `--detected`
- * and `--grid` in the repository, and that harness is the reason to believe
+ * ±1 BPM in 4 s on a metronome and on drum grooves at the right metrical
+ * level, and every glyph on the whole-pixel grid are checked by `pntest
+ * --timing`, `--onset`, `--prime`, `--pitch`, `--ring`, `--detected`,
+ * `--groove` and `--grid` in the repository, and that harness is the reason to believe
  * the tracker.
  */
 
@@ -277,7 +280,44 @@ const kTempoWindow = 600;
 const kTempoLagMin = 30;
 const kTempoLagMax = 100;
 const kTempoSettleR = 0.2;
+const kTempoBands = 3;
+const kTempoLowHz = 400.0;
+const kTempoHighHz = 5000.0;
+const kTempoLevelRatio = 0.70;
+const kTempoPriorBpm = 120.0;
+const kTempoPriorOct = 1.0;
+const kTempoMaxLag = 302;
+const kTempoAgree = 0.02;
 const kEnvSize = 1024;
+
+/** Each bin's tempo register from its centre under the bin law: 0 low, 1 mid, 2 high. */
+function tempoBands(law, sampleRate, out) {
+  for (let j = 0; j < kBins; j += 1) {
+    const hz = binFrequency(j, law, sampleRate);
+    out[j] = hz < kTempoLowHz ? 0 : (hz < kTempoHighHz ? 1 : 2);
+  }
+}
+
+/** Unbiased autocorrelation of zero-mean x at `lag`, normalised by the mean square. */
+function autoCorr(x, n, lag, power) {
+  let acc = 0.0;
+  for (let i = 0; i + lag < n; i += 1) acc += x[i] * x[i + lag];
+  return acc / (n - lag) / power;
+}
+
+/** The largest linearly interpolated R within one sample of fractional lag t (0 past the lags kept). */
+function peakNear(r, maxLag, t) {
+  const lo = Math.floor(t - 1.0);
+  const hi = Math.ceil(t + 1.0);
+  if (lo < 0 || hi + 1 > maxLag) return 0.0;
+  let best = -1e300;
+  for (let q = 4 * lo; q <= 4 * hi; q += 1) {
+    const i = q >> 2;
+    const f = (q & 3) * 0.25;
+    best = Math.max(best, r[i] * (1.0 - f) + r[i + 1] * f);
+  }
+  return best;
+}
 
 const newCell = () => ({ note: -1, sample: 0, volume: 0, written: false, pass: 0, strength: 0.0 });
 
@@ -296,7 +336,8 @@ class Tracker {
     this.cells = Array.from({ length: kMaxRows }, () => Array.from({ length: kMaxChannels }, newCell));
     this.vuSet = new Int32Array(kMaxChannels);
     this.vuTime = new Float64Array(kMaxChannels);
-    this.env = new Float64Array(kEnvSize);
+    this.env = Array.from({ length: kTempoBands }, () => new Float64Array(kEnvSize));
+    this.tempoBand = new Int32Array(kBins);
     this.reset();
   }
 
@@ -311,11 +352,13 @@ class Tracker {
     for (const row of this.cells) for (let k = 0; k < kMaxChannels; k += 1) row[k] = newCell();
     this.vuSet.fill(0); this.vuTime.fill(0);
     this.now = 0.0;
-    this.env.fill(0);
+    for (const e of this.env) e.fill(0);
+    tempoBands(this.settings.binLaw, this.settings.sampleRate, this.tempoBand);
     this.envIndex = -1;
     this.envOrigin = 0.0;
     this.lastDetectSec = -1;
     this.detectedBpm = 0.0;
+    this.candidateBpm = 0.0;
     this.peakR = 0.0;
     bandEdges(this.settings.channels, this.settings.binLaw, this.settings.gamma, this.edges);
   }
@@ -327,6 +370,7 @@ class Tracker {
     this.settings.speed = Math.max(s.speed, 1);
     this.settings.swing = clampd(s.swing, 0.0, 0.5);
     bandEdges(this.settings.channels, this.settings.binLaw, this.settings.gamma, this.edges);
+    tempoBands(this.settings.binLaw, this.settings.sampleRate, this.tempoBand);
   }
 
   tempoSettled() { return this.detectedBpm > 0.0; }
@@ -422,8 +466,11 @@ class Tracker {
 
   listen(seconds, m, dt) {
     this.writtenLastFrame = 0;
-    let onsetTotal = 0.0;
     const pass = this.pass;
+
+    // The tempo detector's registers read every bin, whatever the channels.
+    const bandFlux = new Float64Array(kTempoBands);
+    for (let j = 0; j < kBins; j += 1) bandFlux[this.tempoBand[j]] += Math.max(0.0, m[j] - this.prev[j]);
 
     for (let k = 0; k < this.settings.channels; k += 1) {
       let flux = 0.0;
@@ -433,7 +480,6 @@ class Tracker {
         if (m[j] > m[peak]) peak = j;
       }
       this.flux[k] = flux;
-      onsetTotal += flux;
 
       const threshold = Math.max(kAbsoluteFloor, this.floor[k] * this.settings.ratio);
       const rising = flux > this.fluxPrev[k];
@@ -467,22 +513,24 @@ class Tracker {
     }
     this.prev.set(m);
 
-    this.feedTempo(seconds, onsetTotal);
+    this.feedTempo(seconds, bandFlux);
   }
 
-  feedTempo(seconds, onset) {
+  feedTempo(seconds, bandFlux) {
     const index = Math.floor((seconds - this.envOrigin) * kTempoRate);
     if (index < 0) return;
-    if (this.envIndex < 0) {
-      this.env[index % kEnvSize] = onset;
-      this.envIndex = index;
-    } else if (index > this.envIndex) {
-      const from = Math.max(this.envIndex + 1, index - kEnvSize);
-      for (let i = from; i <= index; i += 1) this.env[i % kEnvSize] = onset;
-      this.envIndex = index;
-    } else {
-      this.env[index % kEnvSize] = Math.max(this.env[index % kEnvSize], onset);
+    for (let b = 0; b < kTempoBands; b += 1) {
+      const env = this.env[b];
+      if (this.envIndex < 0) {
+        env[index % kEnvSize] = bandFlux[b];
+      } else if (index > this.envIndex) {
+        const from = Math.max(this.envIndex + 1, index - kEnvSize);
+        for (let i = from; i <= index; i += 1) env[i % kEnvSize] = bandFlux[b];
+      } else {
+        env[index % kEnvSize] = Math.max(env[index % kEnvSize], bandFlux[b]);
+      }
     }
+    this.envIndex = Math.max(this.envIndex, index);
 
     const second = Math.floor(seconds - this.envOrigin);
     if (second > this.lastDetectSec) {
@@ -493,47 +541,114 @@ class Tracker {
 
   detectTempo() {
     const n = Math.min(this.envIndex + 1, kTempoWindow);
+    const kWeight = [1.0, 1.0, 0.5];
+    const kSmooth = 6;
+    const kSigma = 2.0;
+    const kOwnLagMax = 200;
+
+    const kernel = new Float64Array(2 * kSmooth + 1);
+    for (let k = -kSmooth; k <= kSmooth; k += 1) kernel[k + kSmooth] = Math.exp(-0.5 * (k / kSigma) * (k / kSigma));
+
     const x = new Float64Array(kTempoWindow);
-    let mean = 0.0;
-    for (let i = 0; i < n; i += 1) {
-      x[i] = this.env[(this.envIndex - n + 1 + i) % kEnvSize];
-      mean += x[i];
+    const raw = new Float64Array(kTempoWindow);
+    const z = new Float64Array(kTempoWindow);
+    for (let b = 0; b < kTempoBands; b += 1) {
+      for (let i = 0; i < n; i += 1) raw[i] = this.env[b][(this.envIndex - n + 1 + i) % kEnvSize];
+      // Smooth, renormalising the kernel where it runs off either end.
+      let mean = 0.0;
+      for (let i = 0; i < n; i += 1) {
+        let acc = 0.0, wsum = 0.0;
+        for (let k = -kSmooth; k <= kSmooth; k += 1) {
+          if (i + k >= 0 && i + k < n) {
+            acc += kernel[k + kSmooth] * raw[i + k];
+            wsum += kernel[k + kSmooth];
+          }
+        }
+        z[i] = acc / wsum;
+        mean += z[i];
+      }
+      mean /= n;
+      let power = 0.0;
+      for (let i = 0; i < n; i += 1) {
+        z[i] -= mean;
+        power += z[i] * z[i];
+      }
+      power /= n;
+      if (!(power > 1e-18)) continue;
+      let own = 0.0;
+      const ownMax = Math.min(kOwnLagMax, n - 60);
+      for (let lag = kTempoLagMin; lag <= ownMax; lag += 1) own = Math.max(own, autoCorr(z, n, lag, power));
+      const w = kWeight[b] * own / Math.sqrt(power);
+      for (let i = 0; i < n; i += 1) x[i] += w * z[i];
     }
-    mean /= n;
-    let energy = 0.0;
-    for (let i = 0; i < n; i += 1) {
-      x[i] -= mean;
-      energy += x[i] * x[i];
+
+    let power = 0.0;
+    for (let i = 0; i < n; i += 1) power += x[i] * x[i];
+    power /= n;
+    if (!(power > 1e-18)) return;
+    const maxLag = Math.min(kTempoMaxLag, n - 60);
+    const r = new Float64Array(kTempoMaxLag + 2);
+    for (let lag = 0; lag <= maxLag; lag += 1) r[lag] = autoCorr(x, n, lag, power);
+
+    // A pulse, its grouping, and (at half weight) its subdivision.
+    const score = (t) => 0.5 * peakNear(r, maxLag, 0.5 * t) + peakNear(r, maxLag, t) + peakNear(r, maxLag, 2.0 * t);
+    // The family: the best score under the prior, on a quarter-sample grid.
+    let family = kTempoLagMin, bestScore = -1e300;
+    for (let q = 4 * kTempoLagMin; q <= 4 * kTempoLagMax; q += 1) {
+      const t = 0.25 * q;
+      const octs = Math.log2(60.0 * kTempoRate / t / kTempoPriorBpm) / kTempoPriorOct;
+      const sc = score(t) * Math.exp(-0.5 * octs * octs);
+      if (sc > bestScore) {
+        bestScore = sc;
+        family = t;
+      }
     }
-    if (!(energy > 0.0)) return;
-
-    const r = new Float64Array(kTempoLagMax + 2);
-    for (let lag = kTempoLagMin - 1; lag <= kTempoLagMax + 1; lag += 1) {
-      let acc = 0.0;
-      for (let i = 0; i + lag < n; i += 1) acc += x[i] * x[i + lag];
-      r[lag] = acc / energy;
+    // The level: the fastest member within the ratio of the best, no prior.
+    const members = [], scores = [];
+    let top = -1e300;
+    for (let j = -2; j <= 2; j += 1) {
+      const t = family * 2 ** j;
+      if (t < kTempoLagMin || t > kTempoLagMax) continue;
+      members.push(t);
+      scores.push(score(t));
+      top = Math.max(top, scores[scores.length - 1]);
     }
-
-    let best = kTempoLagMin;
-    for (let lag = kTempoLagMin; lag <= kTempoLagMax; lag += 1) if (r[lag] > r[best]) best = lag;
-
-    for (const half of [Math.trunc(best / 2), Math.trunc((best + 1) / 2)]) {
-      if (half >= kTempoLagMin && half < best && r[half] >= 0.7 * r[best]) {
-        best = half;
+    let best = family;
+    for (let i = 0; i < members.length; i += 1) {
+      if (scores[i] >= kTempoLevelRatio * top) {
+        best = members[i];
         break;
       }
     }
 
-    if (r[best] < kTempoSettleR) return;
-
-    let lag = best;
-    if (best > kTempoLagMin - 1 && best < kTempoLagMax + 1) {
-      const a = r[best - 1], b = r[best], c = r[best + 1];
-      const d = a - 2.0 * b + c;
-      if (d < 0.0) lag += 0.5 * (a - c) / d;
+    const peak = peakNear(r, maxLag, best);
+    if (peak < kTempoSettleR) {
+      this.candidateBpm = 0.0;
+      return;
     }
-    this.peakR = r[best];
-    this.detectedBpm = 60.0 * kTempoRate / lag;
+
+    // Refine on the peak of R at the largest multiple that fits (up to 4).
+    const m = Math.max(1, Math.min(4, Math.trunc((maxLag - 3) / best)));
+    const c = m * best;
+    const hw = Math.max(1, Math.trunc(best / 8.0));
+    const lo = Math.max(1, Math.floor(c - hw));
+    const hi = Math.min(maxLag - 1, Math.ceil(c + hw));
+    let at = lo;
+    for (let lag = lo; lag <= hi; lag += 1) if (r[lag] > r[at]) at = lag;
+    let lag = at;
+    {
+      const a = r[at - 1], b = r[at], cc = r[at + 1];
+      const d = a - 2.0 * b + cc;
+      if (d < 0.0) lag += 0.5 * (a - cc) / d;
+    }
+    lag /= m;
+    // Published only when the reading before agrees within 2 %.
+    const reading = 60.0 * kTempoRate / lag;
+    const agrees = (a, b) => b > 0.0 && Math.abs(a / b - 1.0) <= kTempoAgree;
+    const publish = agrees(reading, this.candidateBpm) || agrees(reading, this.detectedBpm);
+    this.candidateBpm = reading;
+    this.peakR = peak;
+    if (publish) this.detectedBpm = reading;
   }
 
   /** One host frame. `bins` is a Float32Array — the host's floats. */
@@ -1041,7 +1156,7 @@ const PROGRAMMES = [
   {
     id: 'metronome',
     name: 'Metronome, 120 BPM',
-    hint: 'One kick-shaped click on every beat and nothing else. Tempo Source = Detected should read 120 within ±1 BPM after three seconds, and the header’s ? becomes *.',
+    hint: 'One kick-shaped click on every beat and nothing else. Tempo Source = Detected should read 120 within ±1 BPM after four seconds, and the header’s ? becomes *.',
     bpm: 120,
     bars: 1,
     hits: [[0, 'kick'], [4, 'kick'], [8, 'kick'], [12, 'kick']],
@@ -1234,7 +1349,7 @@ const edgesText = (v) => {
 const PARAMS = [
   // -- Clock --------------------------------------------------------------
   opt('tempoSource', 'Tempo Source', ['Host', 'Detected', 'Manual'], 0, 'Clock',
-    'Where the row clock’s BPM comes from. Host: what SetBeatInfo says — on this page the programme’s own tempo, in Resolume the composition’s. Detected: the ported autocorrelation of the onset envelope, once a second over the last six; the header shows ? until it has settled and * after. Manual: the BPM control.'),
+    'Where the row clock’s BPM comes from. Host: what SetBeatInfo says — on this page the programme’s own tempo, in Resolume the composition’s. Detected: the ported tempo detector — the onset envelope in three registers (low, mid, high), each standardised, autocorrelated once a second over the last six, the beat chosen as the fastest level scoring within 0.70 of the best, and published once two readings in a row agree; the header shows ? until it has settled and * after. Manual: the BPM control.'),
   std('bpm', 'BPM', kBpmDefault, 'Clock', {
     display: (v) => `${BpmFromControl(v).toFixed(1)} BPM`,
     hint: 'Manual tempo, 60 to 200. The default of 0.4642857 is 125 BPM, the figure the Amiga-era trackers ran at (a tick of 20 ms). Read only when Tempo Source is Manual.',
@@ -1327,13 +1442,13 @@ const mounted = mountDemo({
   differences: [
     'There is no audio. The plugin reads one thing from its host — Resolume’s 64-bin FFT buffer, once per frame — and a browser has no Resolume. This page does not ask for a microphone. A pattern editor with no audio is an empty grid, so the page synthesises a spectrum: a drum-loop-like programme (a kick, a clap, a stab whose pitch moves, closed and open hats on a 16-step grid at 125 BPM; or a metronome, a sparse pattern, silence) is written straight into 64 bins as decaying spectral shapes on the page’s clock, with a ±5 % per-bin jitter from an integer hash. Nothing is sampled and nothing is licensed.',
     'It is the page’s spectrum, not a host’s. The bins are laid out as the plugin’s Linear law assumes — bin j centred at (j + ½) / 64 of a 22.05 kHz Nyquist — and written as magnitudes, so Bin Law on Linear and Bin Value on Magnitude read the programme as written and the other settings show what the other assumptions do to the same numbers. Resolume’s window, normalisation, bin layout and sample rate are unknown; SetSampleRate is never called here, so the port assumes 44.1 kHz exactly as the plugin does when a host never says. The plugin’s onset thresholds (the ratio, the one-second floor, the 50 ms refractory, the eighth-of-level seed) were set on synthetic spectra and one synthetic WAV, never on programme material through Resolume’s FFT, and this page is the same kind of evidence.',
-    'The page is the host’s tempo. Resolume tells a plugin its BPM through SetBeatInfo; here the port is handed the programme’s own tempo the same way, so Tempo Source = Host is exactly right on this page and only as right as the composition’s BPM in Resolume. Detected runs the ported autocorrelation on the page’s onsets for real, and its ? / * in the header is the port’s own verdict.',
+    'The page is the host’s tempo. Resolume tells a plugin its BPM through SetBeatInfo; here the port is handed the programme’s own tempo the same way, so Tempo Source = Host is exactly right on this page and only as right as the composition’s BPM in Resolume. Detected runs the ported detector on the page’s onsets for real (the drum loop reads 125 from about four seconds, the metronome 120; the sparse programme has no beat in range and stays ?), and its ? / * in the header is the port’s own verdict.',
     'Speed, Rows Visible and Scale are FF_TYPE_INTEGER in the plugin, holding a real integer with a real range. The kit has no integer control, so they are dropdowns of every value in the plugin’s range, and the integer is what the port receives.',
     'The Audio buffer parameter and the About block are absent from the panel. The buffer is written by a host, not an operator — the programme stands in for it — and the About block’s text line and link buttons exist so a host has somewhere to put links a web page already has. The other 17 parameters are all here, in the constructor’s order and groups, with its names, element lists and defaults.',
     'There is no clip, no "use my own file" and no backdrop. Pattern is a source with zero inputs, and its screen is drawn opaque over the whole output; the kit offers the clip controls to every demo and this page removes them rather than leaving them present and inert.',
-    'The whole CPU half is a JavaScript port, and nothing checks it but a reader: the bin law and the tracker notes, the band edges, the row clock as base + (t − anchor) / T in double with the 1e-6 row allowance and swing, the ring that clears a row as it is entered (or keeps it), the spectral-flux onset detector primed on frame one and seeded at an eighth of the level, the refractory, the strongest-onset-wins rule, the Cxx volume law, the autocorrelation tempo detector with its half-lag preference and parabolic refinement, the VU meters, the screen composer, LayoutFor, the three palettes, every Controls.h conversion (rounded through Math.fround where the C++ takes a float), ToOption, Renderer::Draw’s uploads and uniform packing, and the 5 × 7 font. The shaders are the plugin’s, unedited and spliced in by script; demo/tools/check_shaders.py fails the repository’s verify script if a character drifts. uFrac, the harness’s negative control in the shader, is 0.0 here as on every frame the plugin renders.',
+    'The whole CPU half is a JavaScript port, and nothing checks it but a reader: the bin law and the tracker notes, the band edges, the row clock as base + (t − anchor) / T in double with the 1e-6 row allowance and swing, the ring that clears a row as it is entered (or keeps it), the spectral-flux onset detector primed on frame one and seeded at an eighth of the level, the refractory, the strongest-onset-wins rule, the Cxx volume law, the v0.1.1 tempo detector (three standardised registers, the pulse-grouping-subdivision score, the fastest level within 0.70 of the best, the two-reading agreement, the parabolic refinement at a multiple of the lag), the VU meters, the screen composer, LayoutFor, the three palettes, every Controls.h conversion (rounded through Math.fround where the C++ takes a float), ToOption, Renderer::Draw’s uploads and uniform packing, and the 5 × 7 font. The shaders are the plugin’s, unedited and spliced in by script; demo/tools/check_shaders.py fails the repository’s verify script if a character drifts. uFrac, the harness’s negative control in the shader, is 0.0 here as on every frame the plugin renders.',
     'The clock is the browser’s frame clock in seconds. The plugin’s Clock, which works out what unit a host’s SetTime is in, is not ported, because there is no unit to discover here. Restart sends the clock backwards, which the tracker treats as a loop point — the phase is carried across and no time passes on that frame — and a paused page moving a control re-runs the same frame with the same spectrum, as a host re-sends its buffer.',
-    'Nothing here is measured. The cursor on floor( t / T ) mod 64 on every frame of ten minutes from a host clock at 499 million milliseconds, one note per onset in the right channel on the right row, no false note on frame one with loud audio already playing, the pitch the bin law predicts for all 64 bins, the ring, a detected tempo within ±1 BPM in 3.0 s and every glyph on the whole-pixel grid at every Scale are checked by pntest in the repository, with no GL context for all but the last. That harness, not this page, is the reason to believe the tracker.',
+    'Nothing here is measured. The cursor on floor( t / T ) mod 64 on every frame of ten minutes from a host clock at 499 million milliseconds, one note per onset in the right channel on the right row, no false note on frame one with loud audio already playing, the pitch the bin law predicts for all 64 bins, the ring, a detected tempo within ±1 BPM in 4.0 s on a metronome and on drum grooves from 80 to 170 BPM at the right metrical level and every glyph on the whole-pixel grid at every Scale are checked by pntest in the repository, with no GL context for all but the last. That harness, not this page, is the reason to believe the tracker.',
     'The plugin has never been loaded into Resolume on any platform and no real audio has reached it in a host. This page is a browser and is evidence about neither.',
   ],
 

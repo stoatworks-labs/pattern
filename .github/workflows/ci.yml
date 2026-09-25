@@ -35,10 +35,11 @@ jobs:
       - name: The tracker
         # Every one of these runs with NO GL context at all -- they measure the
         # tracker's published state: the cursor from a host clock at 499 million
-        # ms, the onsets, frame one, the pitches, the ring, the detected tempo.
+        # ms, the onsets, frame one, the pitches, the ring, the detected tempo
+        # on a metronome and on drum grooves rendered as audio.
         # That is what makes them meaningful on a runner with no GPU.
         run: |
-          for t in timing onset prime pitch ring detected names font; do
+          for t in timing onset prime pitch ring detected groove names font; do
             ./build/pntest "--$t"
           done
 

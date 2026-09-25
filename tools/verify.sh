@@ -17,7 +17,8 @@
 #                 tracker's clock from a host at 499 million ms, one note per
 #                 onset in the right channel on the right row, nothing false
 #                 on frame one, the pitch the bin law predicts, the ring
-#                 clearing and keeping, a detected tempo within a beat --
+#                 clearing and keeping, a detected tempo within a beat on a
+#                 metronome AND on drum grooves at the right metrical level --
 #                 measured on the tracker's published state with NO GL
 #                 context anywhere near them, each with its negative control
 #   grid          and the one check that does read pixels: every glyph on the
@@ -184,7 +185,7 @@ PNTEST="$BUILD/pntest"
 # The tracker. None of these opens a GL context.
 #---------------------------------------------------------------------------
 step "tracker (no GL)"
-for t in timing onset prime pitch ring detected names font; do
+for t in timing onset prime pitch ring detected groove names font; do
 	log="/tmp/pattern-$t.log"
 	if "$PNTEST" "--$t" >"$log" 2>&1; then
 		pass "pntest --$t"
@@ -194,12 +195,38 @@ for t in timing onset prime pitch ring detected names font; do
 	fi
 done
 
+#---------------------------------------------------------------------------
+# The release video's soundtrack, when the backend checkout is on this
+# machine: a real file, 48 s of synthesised 125 BPM groove, on which v0.1.0
+# read 62 and 100. Optional because CI has no backend checkout.
+#---------------------------------------------------------------------------
+step "the release video's soundtrack (no GL)"
+SOUNDTRACK="${SOUNDTRACK:-$HOME/Projects/infrastructure/stoatworks-backend/video/projects/pattern/footage/soundtrack.wav}"
+if [ -f "$SOUNDTRACK" ]; then
+	for fps in 30 60; do
+		if "$PNTEST" --tempo-wav "$SOUNDTRACK" --truth 125 --from 4 --fps $fps >/tmp/pattern-soundtrack-$fps.log 2>&1; then
+			pass "the video's soundtrack at $fps fps: $( grep -E 'readings' /tmp/pattern-soundtrack-$fps.log | sed 's/^ *ok *//' )"
+		else
+			fail "the video's soundtrack at $fps fps -- see /tmp/pattern-soundtrack-$fps.log"
+		fi
+	done
+else
+	printf '   skipped: the video soundtrack is not at %s\n' "$SOUNDTRACK"
+fi
+
 step "grid (the one check that reads a rasteriser)"
 if "$PNTEST" --grid >/tmp/pattern-grid.log 2>&1; then
 	pass "every glyph on the whole-pixel grid at every Scale, at 640x360 and 320x180"
 else
 	fail "pntest --grid -- see /tmp/pattern-grid.log"
 	grep -E "FAIL" /tmp/pattern-grid.log | head -8
+fi
+# And on Apple's software renderer, which is what a GPU-less CI runner gets.
+if PNTEST_RENDERER=software "$PNTEST" --grid >/tmp/pattern-grid-sw.log 2>&1; then
+	pass "the same on $( sed -n 's/^renderer: //p' /tmp/pattern-grid-sw.log | head -1 )"
+else
+	fail "PNTEST_RENDERER=software pntest --grid -- see /tmp/pattern-grid-sw.log"
+	grep -E "FAIL" /tmp/pattern-grid-sw.log | head -8
 fi
 
 #---------------------------------------------------------------------------
