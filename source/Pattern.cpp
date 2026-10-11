@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -10,9 +11,13 @@
 
 namespace pattern
 {
-static_assert( PT_COUNT_ - PT_ABOUT_TEXT == stoatworks::about::kParamCount,
+static_assert( kAboutLast + 1 - kAboutFirst == stoatworks::about::kParamCount,
 			   "the About block's size changed with the generated header -- "
-			   "add or remove a PT_ABOUT_BUTTON_n to match" );
+			   "add or remove a PT_ABOUT_BUTTON_n to match (and know that the "
+			   "Tempo Out ids after it move with it)" );
+static_assert( PT_SEND_TEMPO == 23 && PT_HIDE_SCREEN == 27 && PT_COUNT_ == 28,
+			   "a released or Tempo Out parameter id moved -- FFGL addresses "
+			   "parameters by index; append, never renumber" );
 
 namespace
 {
@@ -41,6 +46,7 @@ PatternPlugin::PatternPlugin()
 	static std::atomic< int > sNextInstance{ 1 };
 	mInstanceId = sNextInstance.fetch_add( 1 );
 	mTag        = "[" + std::to_string( mInstanceId ) + "] ";
+	mSender.SetInstance( mInstanceId );
 
 	// A source: no inputs at all. Resolume decides where a plugin appears in
 	// its browser from this and nothing else.
@@ -119,7 +125,18 @@ PatternPlugin::PatternPlugin()
 		for( const auto& b : stoatworks::about::buttons() )
 			SetParamInfo( aboutId++, b.label, FF_TYPE_EVENT, false );
 	}
-	group( PT_ABOUT_TEXT, PT_COUNT_ - 1, "About" );
+	group( kAboutFirst, kAboutLast, "About" );
+
+	// -- Tempo Out -------------------------------------------------------------
+	// Appended after About so that no released id moves (Controls.h). Its own
+	// group name: a run sharing an existing group's name would draw a second
+	// header with that name.
+	boolean( PT_SEND_TEMPO, "Send Tempo", false );
+	integer( PT_OSC_PORT, "OSC Port", kOscPortDefault, kOscPortMin, kOscPortMax );
+	integer( PT_DEFAULT_BPM, "Default BPM", kDefaultBpmDefault, kDefaultBpmMin, kDefaultBpmMax );
+	option( PT_WHEN_LOST, "When Lost", { "Hold", "Default" }, 0.0f );
+	boolean( PT_HIDE_SCREEN, "Hide Screen", false );
+	group( PT_SEND_TEMPO, PT_HIDE_SCREEN, "Tempo Out" );
 
 	mTracker.SetSettings( CurrentSettings() );
 }
@@ -164,7 +181,10 @@ void PatternPlugin::SetBeatInfo( float bpm, float barPhase )
 {
 	CFFGLPlugin::SetBeatInfo( bpm, barPhase );
 	if( bpm > 0.0f && std::isfinite( bpm ) )
-		mHostBpm = bpm;
+	{
+		mHostBpm     = bpm;
+		mHostBpmSeen = true;
+	}
 }
 
 void PatternPlugin::SetSampleRate( unsigned int sampleRate )
@@ -178,8 +198,8 @@ FFResult PatternPlugin::SetFloatParameter( unsigned int index, float value )
 {
 	if( index >= PT_COUNT_ )
 		return FF_FAIL;
-	if( index >= PT_ABOUT_TEXT )
-		return stoatworks::about::handleParam( index - PT_ABOUT_TEXT, value ) ? FF_SUCCESS : FF_FAIL;
+	if( IsAbout( index ) )
+		return stoatworks::about::handleParam( index - kAboutFirst, value ) ? FF_SUCCESS : FF_FAIL;
 	mParams[ index ] = value;
 	return FF_SUCCESS;
 }
@@ -238,6 +258,8 @@ TrackerSettings PatternPlugin::CurrentSettings() const
 	s.gamma       = SplitExponent( mParams[ PT_BAND_SPLIT ] );
 	s.fold        = Bool( mParams[ PT_FOLD ] );
 	s.sampleRate  = mSampleRate;
+	s.fallbackBpm = Int( PT_DEFAULT_BPM, kDefaultBpmMin, kDefaultBpmMax );
+	s.whenLost    = OptionIndex( PT_WHEN_LOST, kWhenLostCount );
 	return s;
 }
 
@@ -247,7 +269,99 @@ DisplaySettings PatternPlugin::CurrentDisplay() const
 	d.rowsVisible = Int( PT_ROWS_VISIBLE, kRowsVisibleMin, kRowsVisibleMax );
 	d.showVu      = Bool( mParams[ PT_SHOW_VU ] );
 	d.showEffects = Bool( mParams[ PT_SHOW_EFFECTS ] );
+	d.status      = TempoOutStatus();
 	return d;
+}
+
+char* PatternPlugin::GetParameterDisplay( unsigned int index )
+{
+	char buffer[ 48 ] = {};
+	if( index == PT_BPM )
+		std::snprintf( buffer, sizeof( buffer ), "%.1f BPM", BpmFromControl( mParams[ PT_BPM ] ) );
+	else if( index < PT_COUNT_ && ( GetParamType( index ) == FF_TYPE_TEXT || GetParamType( index ) == FF_TYPE_FILE ) )
+		return GetTextParameter( index );
+	else
+		// What the SDK's default would show (std::to_string of the float),
+		// without going through it: it dereferences m_pPlugin, which is null
+		// outside a host, and an offline harness would crash.
+		std::snprintf( buffer, sizeof( buffer ), "%f", static_cast< double >( index < PT_COUNT_ ? mParams[ index ] : 0.0f ) );
+	mDisplay = buffer;
+	return const_cast< char* >( mDisplay.c_str() );
+}
+
+std::string PatternPlugin::TempoOutStatus() const
+{
+	if( !Bool( mParams[ PT_SEND_TEMPO ] ) )
+		return std::string();
+	char value[ 16 ] = {};
+	std::snprintf( value, sizeof( value ), "%.1f", mSender.LastSent() );
+	const std::string port = std::to_string( Int( PT_OSC_PORT, kOscPortMin, kOscPortMax ) ) + " ";
+	switch( mSender.GetState() )
+	{
+	case TempoSender::State::Off:
+	case TempoSender::State::Waiting: return port + "WAITING";
+	case TempoSender::State::Sent: return port + value + " SENT";
+	case TempoSender::State::Taken: return port + value + " OK";
+	case TempoSender::State::NotTaken: return port + value + " NOT TAKEN";
+	case TempoSender::State::Failed: return port + "SEND FAILED";
+	case TempoSender::State::NotOwner: return port + "ANOTHER SENDS";
+	}
+	return std::string();
+}
+
+void PatternPlugin::StepTempoSend( double wallSeconds )
+{
+	const bool enabled = Bool( mParams[ PT_SEND_TEMPO ] );
+	const int  port    = Int( PT_OSC_PORT, kOscPortMin, kOscPortMax );
+	if( enabled && port != mOscPort )
+	{
+		// A new port is a new listener: say it again there.
+		mUdp.Close();
+		mSender.Forget();
+		mOscPort = port;
+	}
+
+	const TempoSender::Sink sink = tempoSinkForTest ? tempoSinkForTest : TempoSender::Sink( [ this, port ]( double bpm ) {
+		const float value = static_cast< float >( bpm );
+		return mUdp.Send( port, debugPlainFloat ? osc::PlainFloat( osc::kTempoAddress, value )
+												: osc::AbsoluteFloat( osc::kTempoAddress, value ) );
+	} );
+	mSender.Step( enabled, mTracker.TempoTarget(), mHostBpm, mHostBpmSeen, wallSeconds, sink );
+
+	if( !enabled )
+	{
+		mUdp.Close();
+		mOscPort = 0;
+	}
+	mTempoOutUsed = mTempoOutUsed || enabled;
+	if( !mTempoOutUsed )
+		return;
+
+	// The log, on transitions only. These are the sentences an operator
+	// needs when the composition's tempo is not following.
+	char value[ 16 ] = {};
+	std::snprintf( value, sizeof( value ), "%.1f", mSender.LastSent() );
+	const std::string where = "127.0.0.1:" + std::to_string( port );
+	std::string       line;
+	switch( mSender.GetState() )
+	{
+	case TempoSender::State::Off: line = "tempo out: off"; break;
+	case TempoSender::State::Waiting:
+		line = "tempo out: on, nothing to send yet (no tempo detected, and When Lost is Hold)";
+		break;
+	case TempoSender::State::Sent: line = std::string( "tempo out: sent " ) + value + " BPM to " + where; break;
+	case TempoSender::State::Taken: line = std::string( "tempo out: Resolume's tempo is " ) + value + " BPM"; break;
+	case TempoSender::State::NotTaken:
+		line = std::string( "tempo out: Resolume's tempo did not become " ) + value + " BPM after " +
+			   std::to_string( 1 + TempoSender::kMaxResends ) + " sends to " + where +
+			   " -- is OSC Input switched on in Resolume (Preferences > OSC), on port " + std::to_string( port ) + "?";
+		break;
+	case TempoSender::State::Failed: line = "tempo out: could not send to " + where + ": " + mUdp.Error(); break;
+	case TempoSender::State::NotOwner:
+		line = "tempo out: another SW Pattern is already sending the tempo; this one stays quiet";
+		break;
+	}
+	diag::stateChanged( mTag + "tempo out", mTag + line );
 }
 
 int PatternPlugin::ReadSpectrum( float* bins, int capacity ) const
@@ -300,6 +414,13 @@ FFResult PatternPlugin::ProcessOpenGL( ProcessOpenGLStruct* pGL )
 
 	Advance( seconds );
 
+	// Tempo Out runs on the real clock, not the host's: a looping clip sends
+	// the host's time backwards, and "one send a second" must not.
+	{
+		using namespace std::chrono;
+		StepTempoSend( duration_cast< duration< double > >( steady_clock::now().time_since_epoch() ).count() );
+	}
+
 	// A pattern that never fills is the commonest support question there
 	// is, and from the front it is indistinguishable from a broken plugin.
 	{
@@ -311,9 +432,22 @@ FFResult PatternPlugin::ProcessOpenGL( ProcessOpenGLStruct* pGL )
 		diag::stateChanged( mTag + "audio", mTag + ( any ? "audio present on the layer"
 														  : "no audio on this layer -- every FFT bin is zero" ) );
 		const TrackerSettings& ts = mTracker.Settings();
+		const char* detected = ts.tempoSource != 1       ? ""
+							   : mTracker.TempoLive()    ? " (detected, confirmed and live)"
+							   : mTracker.TempoLost()    ? " (detected, lost)"
+							   : mTracker.TempoSettled() ? " (detected, not confirmed yet)"
+														 : " (detected, not settled)";
 		diag::stateChanged( mTag + "tempo", mTag + "tempo source " + std::to_string( ts.tempoSource ) + ", " +
 												std::to_string( static_cast< int >( std::lround( mTracker.Bpm() ) ) ) +
-												" BPM, speed " + std::to_string( ts.speed ) );
+												" BPM" + detected + ", speed " + std::to_string( ts.speed ) );
+	}
+
+	// Hide Screen: everything above still runs -- the listening, the clock,
+	// Tempo Out -- and the layer gets a transparent frame.
+	if( Bool( mParams[ PT_HIDE_SCREEN ] ) )
+	{
+		mRenderer.Clear( width, height, pGL->HostFBO );
+		return FF_SUCCESS;
 	}
 
 	const Screen screen = BuildScreen();

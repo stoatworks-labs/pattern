@@ -288,6 +288,16 @@ const kTempoPriorBpm = 120.0;
 const kTempoPriorOct = 1.0;
 const kTempoMaxLag = 302;
 const kTempoAgree = 0.02;
+// Tempo Out's confirmed / live / lost (Tracker.h, "Confirmed, live and lost").
+// The page has no Tempo Out group, so When Lost is Hold and only the header's
+// `*` / `?` uses these -- but they are the plugin's rules, so the header says
+// what the plugin's would.
+const kTempoConfirmRun = 3;
+const kTempoTrustR = 0.3;
+const kTempoQuietSeconds = 1.0;
+const kTempoLostSeconds = 8.0;
+const kTempoSilenceSeconds = 2.0;
+const kSoundLevel = 1e-6;
 const kEnvSize = 1024;
 
 /** Each bin's tempo register from its centre under the bin law: 0 low, 1 mid, 2 high. */
@@ -359,6 +369,13 @@ class Tracker {
     this.lastDetectSec = -1;
     this.detectedBpm = 0.0;
     this.candidateBpm = 0.0;
+    this.lastPublishAt = 0.0;
+    this.lastSoundAt = 0.0;
+    this.published = false;
+    this.run = [0.0, 0.0, 0.0];
+    this.runCount = 0;
+    this.confirmedBpm = 0.0;
+    this.lastConfirmAt = 0.0;
     this.peakR = 0.0;
     bandEdges(this.settings.channels, this.settings.binLaw, this.settings.gamma, this.edges);
   }
@@ -374,6 +391,29 @@ class Tracker {
   }
 
   tempoSettled() { return this.detectedBpm > 0.0; }
+  /** Confirmations coming and sound playing: the header's `*`. */
+  tempoLive() {
+    return this.confirmedBpm > 0.0 && this.now - this.lastConfirmAt <= kTempoLostSeconds &&
+      this.now - this.lastSoundAt <= kTempoSilenceSeconds;
+  }
+  tempoLost() { return this.confirmedBpm > 0.0 && !this.tempoLive(); }
+
+  confirm() {
+    if (!this.published || !(this.peakR >= kTempoTrustR) || this.now - this.lastSoundAt > kTempoQuietSeconds) {
+      this.runCount = 0;
+      return;
+    }
+    this.run.shift();
+    this.run.push(this.detectedBpm);
+    this.runCount = Math.min(this.runCount + 1, kTempoConfirmRun);
+    if (this.runCount < kTempoConfirmRun) return;
+    let lo = this.run[0], hi = this.run[0], sum = 0.0;
+    for (const b of this.run) { lo = Math.min(lo, b); hi = Math.max(hi, b); sum += b; }
+    if (hi / lo - 1.0 <= kTempoAgree) {
+      this.confirmedBpm = sum / kTempoConfirmRun;
+      this.lastConfirmAt = this.now;
+    }
+  }
   bandEdge(k) { return this.edges[k]; }
   at(row, channel) { return this.cells[row][channel]; }
 
@@ -405,6 +445,10 @@ class Tracker {
     this.now = seconds;
     this.envOrigin = seconds;
     this.envIndex = -1;
+    this.lastPublishAt = seconds;
+    this.lastSoundAt = seconds;
+    this.lastConfirmAt = seconds;
+    this.runCount = 0;
 
     this.prev.set(m);
     for (let k = 0; k < this.settings.channels; k += 1) {
@@ -535,7 +579,11 @@ class Tracker {
     const second = Math.floor(seconds - this.envOrigin);
     if (second > this.lastDetectSec) {
       this.lastDetectSec = second;
-      if (this.envIndex + 1 >= 3 * kTempoRate) this.detectTempo();
+      if (this.envIndex + 1 >= 3 * kTempoRate) {
+        this.published = false;
+        this.detectTempo();
+        this.confirm();
+      }
     }
   }
 
@@ -648,7 +696,11 @@ class Tracker {
     const publish = agrees(reading, this.candidateBpm) || agrees(reading, this.detectedBpm);
     this.candidateBpm = reading;
     this.peakR = peak;
-    if (publish) this.detectedBpm = reading;
+    if (publish) {
+      this.detectedBpm = reading;
+      this.lastPublishAt = this.now;
+      this.published = true;
+    }
   }
 
   /** One host frame. `bins` is a Float32Array — the host's floats. */
@@ -673,12 +725,22 @@ class Tracker {
         this.lastFire[k] -= this.lastSeconds - seconds;
       }
       this.envOrigin -= this.lastSeconds - seconds;
+      this.lastPublishAt -= this.lastSeconds - seconds;
+      this.lastSoundAt -= this.lastSeconds - seconds;
+      this.lastConfirmAt -= this.lastSeconds - seconds;
       this.lastSeconds = seconds;
     }
 
     const dt = seconds - this.lastSeconds;
     this.lastSeconds = seconds;
     this.now = seconds;
+
+    for (let j = 0; j < kBins; j += 1) {
+      if (m[j] > kSoundLevel) {
+        this.lastSoundAt = seconds;
+        break;
+      }
+    }
 
     this.reanchorIfNeeded(seconds);
     this.advanceRows(seconds);
@@ -752,7 +814,7 @@ function compose(tracker, display) {
     label('PAT ');
     value(`${kHex[pat >> 4]}${kHex[pat & 15]} `);
     label('BPM ');
-    value(`${pad3(bpm)}${ts.tempoSource === 1 ? (tracker.tempoSettled() ? '*' : '?') : ' '} `);
+    value(`${pad3(bpm)}${ts.tempoSource === 1 ? (tracker.tempoLive() ? '*' : '?') : ' '} `);
     label('SPD ');
     value(pad02(Math.min(ts.speed, 99)));
   }
@@ -1156,7 +1218,7 @@ const PROGRAMMES = [
   {
     id: 'metronome',
     name: 'Metronome, 120 BPM',
-    hint: 'One kick-shaped click on every beat and nothing else. Tempo Source = Detected should read 120 within ±1 BPM after four seconds, and the header’s ? becomes *.',
+    hint: 'One kick-shaped click on every beat and nothing else. Tempo Source = Detected should read 120 within ±1 BPM after four seconds, and the header’s ? becomes * once three readings in a row agree, at about six.',
     bpm: 120,
     bars: 1,
     hits: [[0, 'kick'], [4, 'kick'], [8, 'kick'], [12, 'kick']],
@@ -1349,7 +1411,7 @@ const edgesText = (v) => {
 const PARAMS = [
   // -- Clock --------------------------------------------------------------
   opt('tempoSource', 'Tempo Source', ['Host', 'Detected', 'Manual'], 0, 'Clock',
-    'Where the row clock’s BPM comes from. Host: what SetBeatInfo says — on this page the programme’s own tempo, in Resolume the composition’s. Detected: the ported tempo detector — the onset envelope in three registers (low, mid, high), each standardised, autocorrelated once a second over the last six, the beat chosen as the fastest level scoring within 0.70 of the best, and published once two readings in a row agree; the header shows ? until it has settled and * after. Manual: the BPM control.'),
+    'Where the row clock’s BPM comes from. Host: what SetBeatInfo says — on this page the programme’s own tempo, in Resolume the composition’s. Detected: the ported tempo detector — the onset envelope in three registers (low, mid, high), each standardised, autocorrelated once a second over the last six, the beat chosen as the fastest level scoring within 0.70 of the best, and published once two readings in a row agree; the header shows * only while the tempo is confirmed (three publications in a row, a second apart, that agree) and sound is playing, and ? otherwise. Manual: the BPM control.'),
   std('bpm', 'BPM', kBpmDefault, 'Clock', {
     display: (v) => `${BpmFromControl(v).toFixed(1)} BPM`,
     hint: 'Manual tempo, 60 to 200. The default of 0.4642857 is 125 BPM, the figure the Amiga-era trackers ran at (a tick of 20 ms). Read only when Tempo Source is Manual.',
@@ -1404,7 +1466,9 @@ function readout(tracker, programme, layout) {
   const now = performance.now();
   if (now - readoutAt < 150) return;
   readoutAt = now;
-  const detected = tracker.detectedBpm > 0 ? `${tracker.detectedBpm.toFixed(1)} BPM` : 'not settled';
+  const detected = tracker.detectedBpm > 0
+    ? `${tracker.detectedBpm.toFixed(1)} BPM (${tracker.tempoLive() ? 'confirmed' : tracker.tempoLost() ? 'lost' : 'not confirmed'})`
+    : 'not settled';
   const rowHex = `${kHex[tracker.row >> 4]}${kHex[tracker.row & 15]}`;
   readoutNode.textContent =
     `Programme: ${programme.bpm} BPM (the page’s, handed to the port as the host’s) · clock in use ${tracker.bpm.toFixed(1)} BPM · row ${rowHex} of pass ${tracker.pass} · detected ${detected} · screen ${layout.screenW} × ${layout.screenH} at Scale ${layout.scale}, origin ${layout.originX}, ${layout.originY}`;
@@ -1442,11 +1506,11 @@ const mounted = mountDemo({
   differences: [
     'There is no audio. The plugin reads one thing from its host — Resolume’s 64-bin FFT buffer, once per frame — and a browser has no Resolume. This page does not ask for a microphone. A pattern editor with no audio is an empty grid, so the page synthesises a spectrum: a drum-loop-like programme (a kick, a clap, a stab whose pitch moves, closed and open hats on a 16-step grid at 125 BPM; or a metronome, a sparse pattern, silence) is written straight into 64 bins as decaying spectral shapes on the page’s clock, with a ±5 % per-bin jitter from an integer hash. Nothing is sampled and nothing is licensed.',
     'It is the page’s spectrum, not a host’s. The bins are laid out as the plugin’s Linear law assumes — bin j centred at (j + ½) / 64 of a 22.05 kHz Nyquist — and written as magnitudes, so Bin Law on Linear and Bin Value on Magnitude read the programme as written and the other settings show what the other assumptions do to the same numbers. Resolume’s window, normalisation, bin layout and sample rate are unknown; SetSampleRate is never called here, so the port assumes 44.1 kHz exactly as the plugin does when a host never says. The plugin’s onset thresholds (the ratio, the one-second floor, the 50 ms refractory, the eighth-of-level seed) were set on synthetic spectra and one synthetic WAV, never on programme material through Resolume’s FFT, and this page is the same kind of evidence.',
-    'The page is the host’s tempo. Resolume tells a plugin its BPM through SetBeatInfo; here the port is handed the programme’s own tempo the same way, so Tempo Source = Host is exactly right on this page and only as right as the composition’s BPM in Resolume. Detected runs the ported detector on the page’s onsets for real (the drum loop reads 125 from about four seconds, the metronome 120; the sparse programme has no beat in range and stays ?), and its ? / * in the header is the port’s own verdict.',
+    'The page is the host’s tempo. Resolume tells a plugin its BPM through SetBeatInfo; here the port is handed the programme’s own tempo the same way, so Tempo Source = Host is exactly right on this page and only as right as the composition’s BPM in Resolume. Detected runs the ported detector on the page’s onsets for real (the drum loop reads 125 from about four seconds, the metronome 120; the sparse programme has no beat in range and stays ?), and its ? / * in the header is the port’s own verdict: * once the tempo is confirmed, ? again two seconds into Silence.',
     'Speed, Rows Visible and Scale are FF_TYPE_INTEGER in the plugin, holding a real integer with a real range. The kit has no integer control, so they are dropdowns of every value in the plugin’s range, and the integer is what the port receives.',
-    'The Audio buffer parameter and the About block are absent from the panel. The buffer is written by a host, not an operator — the programme stands in for it — and the About block’s text line and link buttons exist so a host has somewhere to put links a web page already has. The other 17 parameters are all here, in the constructor’s order and groups, with its names, element lists and defaults.',
+    'The Audio buffer parameter, the About block and the Tempo Out group are absent from the panel. The buffer is written by a host, not an operator — the programme stands in for it — and the About block’s text line and link buttons exist so a host has somewhere to put links a web page already has. Tempo Out sends the detected tempo to Resolume over OSC, and a web page can send no UDP and has no Resolume to send to; its When Lost is Hold here, which leaves the Detected clock as it always was, and the header’s * / ? follows the plugin’s confirmed-and-live rule. The other 17 parameters are all here, in the constructor’s order and groups, with its names, element lists and defaults.',
     'There is no clip, no "use my own file" and no backdrop. Pattern is a source with zero inputs, and its screen is drawn opaque over the whole output; the kit offers the clip controls to every demo and this page removes them rather than leaving them present and inert.',
-    'The whole CPU half is a JavaScript port, and nothing checks it but a reader: the bin law and the tracker notes, the band edges, the row clock as base + (t − anchor) / T in double with the 1e-6 row allowance and swing, the ring that clears a row as it is entered (or keeps it), the spectral-flux onset detector primed on frame one and seeded at an eighth of the level, the refractory, the strongest-onset-wins rule, the Cxx volume law, the v0.1.1 tempo detector (three standardised registers, the pulse-grouping-subdivision score, the fastest level within 0.70 of the best, the two-reading agreement, the parabolic refinement at a multiple of the lag), the VU meters, the screen composer, LayoutFor, the three palettes, every Controls.h conversion (rounded through Math.fround where the C++ takes a float), ToOption, Renderer::Draw’s uploads and uniform packing, and the 5 × 7 font. The shaders are the plugin’s, unedited and spliced in by script; demo/tools/check_shaders.py fails the repository’s verify script if a character drifts. uFrac, the harness’s negative control in the shader, is 0.0 here as on every frame the plugin renders.',
+    'The whole CPU half is a JavaScript port, and nothing checks it but a reader: the bin law and the tracker notes, the band edges, the row clock as base + (t − anchor) / T in double with the 1e-6 row allowance and swing, the ring that clears a row as it is entered (or keeps it), the spectral-flux onset detector primed on frame one and seeded at an eighth of the level, the refractory, the strongest-onset-wins rule, the Cxx volume law, the v0.1.1 tempo detector (three standardised registers, the pulse-grouping-subdivision score, the fastest level within 0.70 of the best, the two-reading agreement, the parabolic refinement at a multiple of the lag; and Tempo Out’s confirmation, live and lost rules for the header), the VU meters, the screen composer, LayoutFor, the three palettes, every Controls.h conversion (rounded through Math.fround where the C++ takes a float), ToOption, Renderer::Draw’s uploads and uniform packing, and the 5 × 7 font. The shaders are the plugin’s, unedited and spliced in by script; demo/tools/check_shaders.py fails the repository’s verify script if a character drifts. uFrac, the harness’s negative control in the shader, is 0.0 here as on every frame the plugin renders.',
     'The clock is the browser’s frame clock in seconds. The plugin’s Clock, which works out what unit a host’s SetTime is in, is not ported, because there is no unit to discover here. Restart sends the clock backwards, which the tracker treats as a loop point — the phase is carried across and no time passes on that frame — and a paused page moving a control re-runs the same frame with the same spectrum, as a host re-sends its buffer.',
     'Nothing here is measured. The cursor on floor( t / T ) mod 64 on every frame of ten minutes from a host clock at 499 million milliseconds, one note per onset in the right channel on the right row, no false note on frame one with loud audio already playing, the pitch the bin law predicts for all 64 bins, the ring, a detected tempo within ±1 BPM in 4.0 s on a metronome and on drum grooves from 80 to 170 BPM at the right metrical level and every glyph on the whole-pixel grid at every Scale are checked by pntest in the repository, with no GL context for all but the last. That harness, not this page, is the reason to believe the tracker.',
     'The plugin has never been loaded into Resolume on any platform and no real audio has reached it in a host. This page is a browser and is evidence about neither.',

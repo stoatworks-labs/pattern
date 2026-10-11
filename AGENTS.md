@@ -8,7 +8,10 @@ universal macOS `.bundle` and a Windows `.dll`. MIT. Intended home
 `github.com/stoatworks-labs/pattern`; built and released 2026-09-24 as v0.1.0;
 v0.1.1 (2026-09-25) replaced the Detected tempo detector, which locked to half
 the tempo on programme material (see "The detected tempo, v0.1.1").
-**Never loaded into Resolume on macOS**.
+**Never loaded into Resolume on macOS**. Unreleased since v0.1.1: **Tempo Out**
+(issue #5) — the detected tempo pushed into Resolume's composition tempo over
+OSC, a confirmed / live / lost state for the detector, Default BPM / When Lost,
+and Hide Screen (see "Tempo Out").
 
 `CLAUDE.md` is the command reference. This file is the *why*: the idea, every
 number in the harness and where its tolerance comes from, the negative
@@ -55,7 +58,11 @@ row as it enters it.
     source/Render.*           the two textures (R8 font, RGBA8UI screen) and the
                               draw into the host's FBO. Three palettes.
     source/Pattern.*          the plugin: parameters, the host's clock, beat info
-                              and sample rate, Advance / BuildScreen / LayoutFor.
+                              and sample rate, Advance / BuildScreen / LayoutFor,
+                              StepTempoSend, GetParameterDisplay.
+    source/OscSend.*          Tempo Out: the OSC message, one non-blocking UDP
+                              socket to 127.0.0.1 (Winsock or BSD), and
+                              TempoSender, the pure policy of when to send.
     source/Controls.h         parameter ids, 0..1 to engineering units.
     source/{Clock,Diag,Font}  carried from graticule via needle.
     tools/pntest/main.mm      the harness: the checks, --out, --pipe, --bench,
@@ -108,6 +115,10 @@ write the spectrum with `SetParamElementValue`, which is what a host calls.
 | `--detected` | the detected lag scaled by 1.1 (`lagBias`) | reads 109.08, never within +-1 |
 | `--groove` | v0.1.0's detector (`legacyTempo`: the raw summed flux, the best lag, a half at 70 %) | fails 15 of 45 grooves: 160.4 for 80, 180.5 for 90, 200.2 for 100, 62.1 for the video's groove at 125 (30 fps) |
 | `--grid` | a fractional scale of 1.5 in the shader's pixel-to-cell step (`debugFractionalScale`) | 576 glyph pixels off the table |
+| `--grid` Hide Screen | a frame the plugin never cleared (GL torn down first, so the harness's magenta sentinel stays) | 230,400 sentinel pixels |
+| `--send` | no hysteresis (`TempoSender::Debug::noHysteresis`) | the steady 120 sent 54 times in 60 s, where the check allows 1 |
+| `--send` | Tempo Out trusts every publication (`TrackerDebug::unconfirmedTempo`) | 72 noise runs send 82 tempos, where the check allows 0 |
+| `--osc` | the plain float, `,f 120` (`debugPlainFloat`) — Resolume reads it as normalised and sets 500 | 44 bytes, tags `,f`: fails the byte check |
 
 None of the perturbations is reachable from a parameter.
 
@@ -165,6 +176,28 @@ Reverted with `git checkout -- source/Shaders.cpp` on a committed file, and
 ## The traps
 
 Ordered by how much time they cost.
+
+**Noise publishes a tempo, and so does a window straddling a change (Tempo
+Out).** The first `--send` run had Hold sending 141.2 four seconds into
+silence after a 140 metronome, and a metronome turning into noise publishing
+117.72 (R 0.475) and then 82.23 (R 0.224) from noise alone. Measured over 72
+one-minute runs of steady filtered noise rendered as audio (twelve seeds,
+low/high/band-pass, 30 and 60 fps): the v0.1.1 detector published in most of
+them, at R 0.20..0.37. Harmless for a row clock, not for a show's master tempo.
+Hence the confirmation rule (Tracker.h): three publications in consecutive
+cycles, R >= 0.3, sound within a second, within 2 % — zero confirmations over
+the same 72 runs (five at R 0.2), and every asserted groove still confirms.
+
+**The About block is no longer the end of the parameter list.** Three places
+assumed `id >= PT_ABOUT_TEXT` meant About (`SetFloatParameter`, `--list` and
+the harness's name table); with Tempo Out appended after it, that routed Send
+Tempo's value into the About handler. `IsAbout()` is the test now, and a
+static_assert pins ids 23..27.
+
+**A harness that switches Send Tempo on sends to Resolume.** The default OSC
+Port is 7000, and the first frame with Send Tempo on sends. `--osc` sets the
+port to its own listener BEFORE the switch, and `tools/sweep.py` never sweeps
+Send Tempo or OSC Port.
 
 **A metronome cannot fail an octave test, and every tempo check ran at 60 fps
 (v0.1.1).** v0.1.0's `--detected` passed on bursts in one band, which have no
@@ -331,6 +364,41 @@ check that can fail.
 guide (`docs/USER-GUIDE.md`) and the browser demo (`demo/`) were added at
 release.
 
+**Tempo Out's controls (issue #5)** — Send Tempo (off), OSC Port (integer,
+1024..65535, 7000), Default BPM (integer, 60..200 like the detector, 120 as the
+issue asked), When Lost (Hold / Default, Hold), Hide Screen (off), as their own
+group "Tempo Out" appended after About (ids 23..27) so no released id moves.
+Always 127.0.0.1: another machine is out of scope and would bring macOS's
+Local Network prompt. Hold sends nothing new (Resolume keeps the last tempo);
+Default sends Default BPM before the first confirmation and when lost. When
+Lost touches the Detected row clock only under Default; under Hold the clock
+is exactly v0.1.1's.
+
+**Tempo Out sends the detected tempo whatever Tempo Source says.** Tempo Source
+is the row clock's business; with Send Tempo on, Host and Detected converge.
+
+**Rounded to 0.1 BPM, a 0.5 BPM hysteresis, at most once a second; 1 + 3 sends
+two seconds apart before NOT TAKEN; "already there" sends nothing; a value
+Resolume took is never re-asserted against an operator.** Chosen, not
+measured: the settled detector's wobble is a few tenths (0.26 worst on the
+grooves), and a tempo that followed it would re-time every BPM-synced clip.
+
+**The header's `*` now means confirmed and live**, not merely settled: it comes
+at about 6 s on a steady beat, not 4, and goes back to `?` two seconds into
+silence or eight without a confirmation. The browser demo's port carries the
+same rule.
+
+**One sender per process**, a static owner with a two-second takeover, so two
+Pattern clips cannot fight over the tempo and a stopped clip does not hold the
+job for ever.
+
+**Hide Screen is transparent black** (all four channels 0), not the theme's
+background: under Alpha or Add it should add nothing.
+
+**The BPM slider reads in BPM** through `GetParameterDisplay` ("125.0 BPM");
+every other id gets what the SDK's default would show, computed without the
+SDK's default (which dereferences a pointer that is null outside a host).
+
 ---
 
 ## The browser demo
@@ -397,6 +465,14 @@ audio input; and a cue script drove `Host BPM`, `Theme` and `Bin 30`.
 soundtrack at 30 and 60 fps (44 of 44 readings each), and `--grid` under the
 software renderer; the About block regenerated by `sync-about.py` at v0.1.1.
 
+**Tempo Out, 2026-10-11** (unreleased), `tools/verify.sh` all green with `--send`
+and `--osc` added: the numbers in "Tempo Out" below; Hide Screen's 230,400
+transparent pixels; 20 controls that draw live at both rasters, Send Tempo and
+OSC Port skipped by design; `--names` clean as written and as Resolume reduces
+names. The demo port's confirmation logic was run against the C++ on a
+metronome / silence / tempo-change script (40 s, 60 fps): identical to six
+decimals every second — a scratch driver, not in verify.sh.
+
 **The cost**, `pntest --bench`, fastest of five passes of 200 frames with the
 drum loop playing and other plugin builds loading this machine: **0.041 ms at
 1280x720, 0.054 at 1920x1080, 0.128 at 3840x2160** (0.2–0.8 % of a 60 fps
@@ -429,6 +505,14 @@ CPU; the screen texture is re-uploaded every frame (at most 92 x 41 cells).
   four-on-the-floor with an off-beat bass at 80 and 90, still read at the wrong
   level (`--groove` prints them, unasserted).
 - **`barPhase`** is unused (open question 1).
+- **Tempo Out has never sent a tempo to a Resolume.** The message form was
+  measured by hand in Arena 7.27.1 on the Windows VM (UDP from outside the
+  plugin, read back over REST). Unmeasured: the plugin's own datagram
+  arriving there; Resolume reporting its new tempo through `SetBeatInfo` (the
+  NOT TAKEN logic stands on it); whether a clip at opacity 0, or bypassed,
+  still runs; Hide Screen under Resolume's blend modes; the BPM display string
+  in the inspector; Ableton Link carrying an OSC tempo to its peers; a
+  thumbnail or preview instance claiming the sender's place.
 - **`StoatworksAbout.h` and `ATTRIBUTIONS.md` are generated** by the backend's
   `sync-about.py` and `sync-attributions.py` since registration; the About
   block has five entries (`PT_ABOUT_BUTTON_4` carries the user guide).
@@ -582,6 +666,59 @@ out of range; v0.1.0 read 62..64 there).
 
 ---
 
+## Tempo Out
+
+Issue #5 (VJPandaAU, 2026-10-09): set Resolume's tempo from the detected one,
+hide the screen, and fall back to a default when confused.
+
+**The way out.** FFGL 2.x has no host call that sets anything: `SetBeatInfo`
+runs host to plugin, and the only messages a plugin raises are events about
+its own parameters. Resolume's REST API could do it (`PUT
+/api/v1/parameter/by-id/{tempo id}`), but its webserver is off by default,
+holding it on stopped Arena 7.27.1 quitting on macOS (fleet note), the id has
+to be found in a `GET /composition`, and it is TCP from a render thread. OSC
+over UDP to 127.0.0.1 is one datagram.
+
+**The message, measured** in Arena 7.27.1 on the Windows VM, UDP to
+127.0.0.1:7000 and the tempo read back over REST, before any code:
+`,f 0.2083333` -> 119.99998 and `,f 0.5` -> 260 (a float is normalised over
+20..500), `,f 97.5` and `,f 140` -> 500 (clamped), `,i 120` -> 120,
+`,sf "a" 119.9` -> 119.9 and `,sf "a" 87.25` -> 87.25. OSC Input was off by
+default (`<Input Enabled="0" Port="7000"/>` in osc.xml). So the absolute form:
+48 bytes, independent of the range, fractions kept. Bitfocus's Companion
+module sends a plain float BPM to this address, which by this measurement
+sets 500.
+
+**When.** `TempoSender` (OscSend.h) — the target is `Tracker::TempoTarget()`,
+the confirmed tempo while live (Tracker.h, "Confirmed, live and lost"); see
+"Decisions taken without asking" for the numbers and why.
+
+**Measured** (`pntest --send`, `--osc`, 2026-10-11, the fake Resolume reporting
+its tempo through SetBeatInfo every frame, starting at 100):
+
+| Case | Result |
+| --- | --- |
+| metronome 120, 60 s | one send, 120.0 at 6.00 s; Taken |
+| Resolume already at that value | no send; Taken |
+| 120 for 20 s then 140 | 120.0 at 6.00, 140.0 at 27.00 |
+| Resolume never takes it | 120.0 at 6, 8, 10, 12 s; NOT TAKEN |
+| operator sets 128 at 20 s | no further send; Resolume stays 128 |
+| Hold, 140 then silence at 15 s | 140.1 at 6 s only; header `*` at 14.5 s, `?` at 29 s |
+| Default 100, 140 then silence | 100.0 at 0, 140.1 at 6.00, 100.0 at 16.98 (2 s after the last sound) |
+| metronome, noise from 12 s, metronome from 36 s | lost at 23.02 s, live again at 41.00 s |
+| the video's house groove at 125, 30 fps, as audio | one send, 124.8 at 6.00 s |
+| 72 runs x 60 s of steady noise as audio | 0 sends (82 with `unconfirmedTempo`) |
+| two instances | one send between them; the second takes over at 12.00 s when the first stops at 10 |
+| on the wire | exactly `/composition/tempocontroller/tempo\0\0 ,sf\0 a\0\0\0 42f00000`, 48 bytes, on a kernel-chosen port; a port change re-sends at once; off sends nothing |
+
+**What it still gets wrong, by construction:** it sends what the detector
+confirms, at the detector's metrical level — the breakbeat and the off-beat
+bass at 80..90 would set Resolume to half or double. And a music clip on BPM
+Sync transport hears every tempo Tempo Out sets; the guide says to keep music
+on Timeline.
+
+---
+
 ## Open questions
 
 1. **Should row 0 lock to the host's downbeat?** `SetBeatInfo`'s `barPhase`
@@ -612,3 +749,13 @@ out of range; v0.1.0 read 62..64 there).
    rendered grooves and v0.1.0 as its negative control. See "The detected
    tempo, v0.1.1". What remains open is the breakbeat and the off-beat-bass
    groove at 80..90 (above), and anything measured through Resolume's FFT.
+8. **Does Resolume report an OSC-set tempo back through `SetBeatInfo`, and
+   how soon?** Tempo Out's "taken" and its resends stand on it. One session in
+   a real Resolume with an audio device answers it, and the log's `tempo out:`
+   lines are the evidence.
+9. **Does a clip on a layer at opacity 0, or bypassed, still run?** If it
+   does, Hide Screen is a convenience; if not, it is the only way to sit
+   unseen in a show.
+10. **Should Tempo Out fold the tempo into an operator's range** (say
+    90..180) to stop half / double readings reaching the show? Cheap, and the
+    obvious next step if real music bears the octave errors out.

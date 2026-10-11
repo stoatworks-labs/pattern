@@ -44,6 +44,11 @@ public:
 	void Draw( const Screen& screen, const Layout& layout, const Palette& palette, int width, int height,
 			   GLuint hostFBO, float frac = 0.0f );
 
+	/// Hide Screen: the whole output transparent black and nothing drawn, so
+	/// the layer adds nothing under Resolume's Alpha or Add blend. The clear
+	/// colour is put back, as everything else here is.
+	void Clear( int width, int height, GLuint hostFBO );
+
 	const std::string& Note() const { return mNote; }
 
 private:

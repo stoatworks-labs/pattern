@@ -73,11 +73,20 @@ Screen Compose( const Tracker& tracker, const DisplaySettings& display )
 		std::snprintf( value, sizeof( value ), "%c%c ", kHex[ pat >> 4 ], kHex[ pat & 15 ] );
 		text( value );
 		label( "BPM " );
-		std::snprintf( value, sizeof( value ), "%3d%c ", bpm, ts.tempoSource == 1 ? ( tracker.TempoSettled() ? '*' : '?' ) : ' ' );
+		// `*` while the detected tempo is confirmed and live; `?` before
+		// that and while it is lost (Tracker.h, "Confirmed, live and lost").
+		std::snprintf( value, sizeof( value ), "%3d%c ", bpm, ts.tempoSource == 1 ? ( tracker.TempoLive() ? '*' : '?' ) : ' ' );
 		text( value );
 		label( "SPD " );
 		std::snprintf( value, sizeof( value ), "%02d", std::min( ts.speed, 99 ) );
 		text( value );
+	}
+
+	// -- Tempo Out's state, on the row the counters leave blank -------------------
+	if( !display.status.empty() )
+	{
+		w.text( 0, 1, "OSC ", PAL_ACCENT, PAL_BACK );
+		w.text( 4, 1, display.status.c_str(), PAL_TEXT, PAL_BACK );
 	}
 
 	// -- the VU bars -----------------------------------------------------------

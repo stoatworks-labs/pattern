@@ -56,6 +56,13 @@ tracker — `pntest` is.
   clip controls for every demo and `plugin.js` removes them.
 - **The About block.** A text line and link buttons exist so a *host* has
   somewhere to put them. A web page has links of its own.
+- **The Tempo Out group** (Send Tempo, OSC Port, Default BPM, When Lost, Hide
+  Screen). It sends UDP to Resolume; a page can send no UDP and has no Resolume.
+  The port runs with When Lost on Hold, which leaves the Detected clock as it
+  always was. The tracker port does carry Tempo Out's confirmed / live / lost
+  rules, because the header's `*` / `?` is drawn from them: a scratch driver ran
+  them against the C++ on a metronome, silence and tempo-change script and every
+  second matched to six decimals (not in `verify.sh`).
 - **The plugin's `Clock`.** The kit's clock is already in seconds.
 - **Integer controls.** Speed, Rows Visible and Scale are `FF_TYPE_INTEGER`; the
   kit has no integer type, so each is a dropdown of every value in its range.

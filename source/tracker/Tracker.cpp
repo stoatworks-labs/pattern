@@ -90,6 +90,12 @@ void Tracker::Reset()
 	mLastDetectSec = -1;
 	mDetectedBpm   = 0.0;
 	mCandidateBpm  = 0.0;
+	mLastPublishAt = 0.0;
+	mLastSoundAt   = 0.0;
+	mPublished     = false;
+	mRunCount      = 0;
+	mConfirmedBpm  = 0.0;
+	mLastConfirmAt = 0.0;
 	mPeakR         = 0.0;
 	mMemberCount   = 0;
 	bands::BandEdges( mSettings.channels, mSettings.binLaw, mSettings.gamma, mEdges );
@@ -112,8 +118,15 @@ double Tracker::CurrentBpm() const
 	switch( mSettings.tempoSource )
 	{
 	case 1:
-		if( mDetectedBpm > 0.0 )
-			bpm = mDetectedBpm;
+		if( mSettings.whenLost == 1 )
+		{
+			// When Lost = Default: the clock runs on what Tempo Out sends.
+			const double target = TempoTarget();
+			if( target > 0.0 )
+				bpm = target;
+		}
+		else if( mDetectedBpm > 0.0 )
+			bpm = mDetectedBpm;// Hold: exactly the v0.1.1 clock
 		break;
 	case 2:
 		bpm = mSettings.manualBpm;
@@ -126,6 +139,50 @@ double Tracker::CurrentBpm() const
 	if( !( bpm >= 20.0 && bpm <= 999.0 ) )
 		bpm = 120.0;
 	return bpm;
+}
+
+bool Tracker::TempoLive() const
+{
+	const double since = debug.unconfirmedTempo ? mLastPublishAt : mLastConfirmAt;
+	return ConfirmedBpm() > 0.0 && mNow - since <= kTempoLostSeconds && mNow - mLastSoundAt <= kTempoSilenceSeconds;
+}
+
+double Tracker::TempoTarget() const
+{
+	if( TempoLive() )
+		return ConfirmedBpm();
+	if( mSettings.whenLost == 1 && mSettings.fallbackBpm > 0.0 )
+		return mSettings.fallbackBpm;
+	return 0.0;// Hold: nothing new
+}
+
+void Tracker::Confirm()
+{
+	// A cycle that did not publish, or published on little evidence, or with
+	// no sound to speak of, breaks the run.
+	if( !mPublished || !( mPeakR >= kTempoTrustR ) || mNow - mLastSoundAt > kTempoQuietSeconds )
+	{
+		mRunCount = 0;
+		return;
+	}
+	for( int i = 0; i + 1 < kTempoConfirmRun; ++i )
+		mRun[ i ] = mRun[ i + 1 ];
+	mRun[ kTempoConfirmRun - 1 ] = mDetectedBpm;
+	mRunCount                    = std::min( mRunCount + 1, kTempoConfirmRun );
+	if( mRunCount < kTempoConfirmRun )
+		return;
+	double lo = mRun[ 0 ], hi = mRun[ 0 ], sum = 0.0;
+	for( double b : mRun )
+	{
+		lo = std::min( lo, b );
+		hi = std::max( hi, b );
+		sum += b;
+	}
+	if( hi / lo - 1.0 <= kTempoAgree )
+	{
+		mConfirmedBpm  = sum / kTempoConfirmRun;
+		mLastConfirmAt = mNow;
+	}
 }
 
 int Tracker::Vu( int channel ) const
@@ -149,6 +206,10 @@ void Tracker::Prime( double seconds, const double* m )
 	mNow         = seconds;
 	mEnvOrigin   = seconds;
 	mEnvIndex    = -1;
+	mLastPublishAt = seconds;
+	mLastSoundAt   = seconds;
+	mLastConfirmAt = seconds;
+	mRunCount      = 0;
 
 	if( debug.noPrime )
 	{
@@ -343,10 +404,12 @@ void Tracker::FeedTempo( double seconds, const double* bandFlux )
 		mLastDetectSec = second;
 		if( mEnvIndex + 1 >= 3 * kTempoRate )
 		{
+			mPublished = false;
 			if( debug.legacyTempo )
 				DetectTempoLegacy( static_cast< int >( std::min< int64_t >( mEnvIndex + 1, kTempoWindow ) ) );
 			else
 				DetectTempo();
+			Confirm();
 		}
 	}
 }
@@ -494,7 +557,11 @@ void Tracker::DetectTempo()
 		mMemberShare[ i ] = scores[ i ] / top;
 	}
 	if( publish )
-		mDetectedBpm = reading;
+	{
+		mDetectedBpm   = reading;
+		mLastPublishAt = mNow;
+		mPublished     = true;
+	}
 }
 
 /// v0.1.0's detector, kept only as the harness's negative control: the raw
@@ -549,8 +616,10 @@ void Tracker::DetectTempoLegacy( int n )
 			lag += 0.5 * ( a - c ) / d;
 	}
 	lag *= 1.0 + debug.lagBias;
-	mPeakR       = r[ best ];
-	mDetectedBpm = 60.0 * kTempoRate / lag;
+	mPeakR         = r[ best ];
+	mDetectedBpm   = 60.0 * kTempoRate / lag;
+	mLastPublishAt = mNow;
+	mPublished     = true;
 }
 
 void Tracker::Frame( double seconds, const float* bins, int count )
@@ -583,12 +652,22 @@ void Tracker::Frame( double seconds, const float* bins, int count )
 			mLastFire[ k ] -= mLastSeconds - seconds;
 		}
 		mEnvOrigin -= mLastSeconds - seconds;
+		mLastPublishAt -= mLastSeconds - seconds;
+		mLastSoundAt -= mLastSeconds - seconds;
+		mLastConfirmAt -= mLastSeconds - seconds;
 		mLastSeconds = seconds;
 	}
 
 	const double dt = seconds - mLastSeconds;
 	mLastSeconds    = seconds;
 	mNow            = seconds;
+
+	for( int j = 0; j < bands::kBins; ++j )
+		if( m[ j ] > kSoundLevel )
+		{
+			mLastSoundAt = seconds;
+			break;
+		}
 
 	ReanchorIfNeeded( seconds );
 	AdvanceRows( seconds );

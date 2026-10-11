@@ -149,6 +149,19 @@ void Renderer::DeInitGL()
 	mReady = false;
 }
 
+void Renderer::Clear( int width, int height, GLuint hostFBO )
+{
+	if( width <= 0 || height <= 0 )
+		return;
+	GLfloat previous[ 4 ] = {};
+	glGetFloatv( GL_COLOR_CLEAR_VALUE, previous );
+	glBindFramebuffer( GL_FRAMEBUFFER, hostFBO );
+	glViewport( 0, 0, width, height );
+	glClearColor( 0.0f, 0.0f, 0.0f, 0.0f );
+	glClear( GL_COLOR_BUFFER_BIT );
+	glClearColor( previous[ 0 ], previous[ 1 ], previous[ 2 ], previous[ 3 ] );
+}
+
 void Renderer::Draw( const Screen& s, const Layout& l, const Palette& palette, int width, int height, GLuint hostFBO,
 					 float frac )
 {

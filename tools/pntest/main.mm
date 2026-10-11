@@ -25,11 +25,21 @@
 	                six seconds; v0.1.0's detector must fail the same set
 	    --tempo-wav f.wav --truth N [--from S] [--fps N] [--legacy]
 	                the detected tempo of a real file, once a second
+	    --send      Tempo Out's policy against a fake Resolume: one send per
+	                tempo, resends capped when Resolume does not take it, no
+	                fight with an operator, When Lost, one sender per process,
+	                the lost state; no hysteresis must fail
+	    --osc       Tempo Out's datagram through a real socket on 127.0.0.1
+	                (never port 7000), byte for byte; the plain-float form
+	                Resolume clamps to 500 must fail
 	    --names     no parameter name over FFGL's 16 characters, none duplicated
+	                as written or as Resolume addresses it; every id answers
+	                GetParameterDisplay with no host (the BPM slider in BPM)
 	    --font      the glyph table has every character the screen draws
 	    --list      the fleet's parameter listing, for tools/sweep.py
 	    --grid      every glyph lands on the whole-pixel grid at every Scale,
-	                at 640x360 and 320x180 (the one check that reads pixels)
+	                at 640x360 and 320x180 (the one check that reads pixels);
+	                Hide Screen leaves every pixel transparent black
 	    --bench     ms/frame at 720p, 1080p and 4K
 
 	    --out f.png [--size WxH] [--frames N] [--fps N] [--audio PRESET]
@@ -90,6 +100,7 @@
 #include <zlib.h>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <complex>
@@ -105,6 +116,10 @@
 #include <string>
 #include <vector>
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #include "Font.h"
@@ -1745,14 +1760,654 @@ int runTempoWav( const std::string& path, double truth, double fps, double from,
 }
 
 //---------------------------------------------------------------------------
+// --send: Tempo Out's policy, against a fake Resolume. No sockets at all.
+//
+// The plugin is driven as a host drives it -- SetBeatInfo with the
+// composition's tempo every frame, the spectrum through the buffer, Advance
+// -- and then `StepTempoSend`, which is what ProcessOpenGL calls next. The
+// UDP socket is swapped for `FakeResolume::sink`, so what is counted is what
+// the plugin decided to send, and when.
+//---------------------------------------------------------------------------
+namespace
+{
+/// Resolume as far as Tempo Out can see it: a composition tempo a message
+/// may or may not change (OSC Input on or off), reported back through
+/// SetBeatInfo on the next frame -- Resolume calls it every frame.
+struct FakeResolume
+{
+	double tempo = 100.0;///< not the metronome's: "already there" would send nothing
+	bool   takes = true;
+	double now   = 0.0;
+	std::vector< std::pair< double, double > > received;///< (seconds, BPM)
+
+	TempoSender::Sink sink()
+	{
+		return [ this ]( double bpm ) {
+			received.emplace_back( now, bpm );
+			if( takes )
+				tempo = bpm;
+			return true;
+		};
+	}
+};
+
+/// The audio: (until seconds, kind, bpm) segments, the last one held.
+struct Segment
+{
+	double      until;
+	Synth::Kind kind;
+	double      bpm;
+};
+
+void segmentBins( const std::vector< Segment >& programme, int frame, double fps, float* bins )
+{
+	const double t = frame / fps;
+	size_t       i = 0;
+	while( i + 1 < programme.size() && t >= programme[ i ].until )
+		++i;
+	Synth s;
+	s.kind = programme[ i ].kind;
+	s.bpm  = programme[ i ].bpm;
+	s.fps  = fps;
+	s.bins( frame, bins );
+}
+
+/// The flag after the header's BPM: '*', '?' or ' '.
+char headerFlag( const PatternPlugin& p )
+{
+	const Screen s = p.BuildScreen();
+	std::string  row;
+	for( int c = 0; c < s.cols; ++c )
+		row += static_cast< char >( s.At( c, 0 ).glyph );
+	const size_t at = row.find( "BPM " );
+	return at == std::string::npos ? '#' : row[ at + 7 ];
+}
+
+std::string rowText( const PatternPlugin& p, int r )
+{
+	const Screen s = p.BuildScreen();
+	std::string  row;
+	for( int c = 0; c < s.cols; ++c )
+		row += static_cast< char >( s.At( c, r ).glyph );
+	while( !row.empty() && row.back() == ' ' )
+		row.pop_back();
+	return row;
+}
+
+struct SendRun
+{
+	std::vector< std::pair< double, double > > received;
+	TempoSender::State                         state = TempoSender::State::Off;
+	double                                     resolume = 0.0;///< the fake composition tempo at the end
+};
+
+using BinsAt = std::function< void( int frame, double fps, float* bins ) >;
+
+/// `seconds` of audio at `fps` through one plugin with Send Tempo on.
+/// `setUp` runs before the first frame, `during( t, plugin, resolume )` before
+/// every frame.
+SendRun sendRun( const BinsAt& audio, double fps, double seconds, const std::function< void( PatternPlugin& ) >& setUp,
+				 const std::function< void( double, PatternPlugin&, FakeResolume& ) >& during = {} )
+{
+	FakeResolume     resolume;
+	PatternPlugin    p;
+	p.ForceSecondsClock();
+	p.tempoSinkForTest = resolume.sink();
+	p.SetFloatParameter( PT_SEND_TEMPO, 1.0f );
+	if( setUp )
+		setUp( p );
+	float     bins[ kBins ];
+	const int frames = static_cast< int >( seconds * fps );
+	for( int f = 0; f < frames; ++f )
+	{
+		const double t = f / fps;
+		if( during )
+			during( t, p, resolume );
+		p.SetBeatInfo( static_cast< float >( resolume.tempo ), 0.0f );
+		audio( f, fps, bins );
+		inject( p, bins );
+		p.Advance( t );
+		resolume.now = t;
+		p.StepTempoSend( t );
+	}
+	SendRun run;
+	run.received = resolume.received;
+	run.state    = p.Sender().GetState();
+	run.resolume = resolume.tempo;
+	return run;
+}
+
+/// The same at 60 fps from synthetic spectra.
+SendRun sendRun( const std::vector< Segment >& programme, double seconds, const std::function< void( PatternPlugin& ) >& setUp,
+				 const std::function< void( double, PatternPlugin&, FakeResolume& ) >& during = {} )
+{
+	return sendRun( [ &programme ]( int f, double fps, float* bins ) { segmentBins( programme, f, fps, bins ); }, 60.0, seconds,
+					setUp, during );
+}
+
+/// The same from a WAV through the harness's FFT.
+SendRun sendRun( const Wav& wav, double fps, double seconds, const std::function< void( PatternPlugin& ) >& setUp )
+{
+	return sendRun( [ &wav ]( int f, double rate, float* bins ) { wav.bins( ( f + 1 ) / rate, bins ); }, fps, seconds,
+					[ &wav, &setUp ]( PatternPlugin& p ) {
+						p.SetSampleRate( static_cast< unsigned int >( wav.rate ) );
+						if( setUp )
+							setUp( p );
+					} );
+}
+
+/// Steady noise rendered as audio: `salt` seeds it, `type` filters it
+/// (0 low-pass 2 kHz, 1 high-pass 300 Hz, 2 band-pass 1 kHz).
+Wav noiseWav( uint32_t salt, int type, double seconds )
+{
+	Wav w;
+	w.rate       = Groove::kRate;
+	const auto v = Groove::filtered( seconds, 0.001, 1e9, type, type == 0 ? 2000.0 : ( type == 1 ? 300.0 : 1000.0 ), 0.707, 0.3, salt );
+	w.mono.assign( v.begin(), v.end() );
+	return w;
+}
+
+std::string listSends( const std::vector< std::pair< double, double > >& r )
+{
+	std::string out;
+	for( const auto& s : r )
+		out += ( out.empty() ? "" : ", " ) + F( s.second, 1 ) + " at " + F( s.first, 2 ) + " s";
+	return out.empty() ? "none" : out;
+}
+
+const char* stateName( TempoSender::State s )
+{
+	switch( s )
+	{
+	case TempoSender::State::Off: return "Off";
+	case TempoSender::State::Waiting: return "Waiting";
+	case TempoSender::State::Sent: return "Sent";
+	case TempoSender::State::Taken: return "Taken";
+	case TempoSender::State::NotTaken: return "NotTaken";
+	case TempoSender::State::Failed: return "Failed";
+	case TempoSender::State::NotOwner: return "NotOwner";
+	}
+	return "?";
+}
+} // namespace
+
+int runSend()
+{
+	std::printf( "Tempo Out: what the plugin sends to Resolume, and when -- against a fake Resolume, no sockets\n"
+				 "(60 fps; the fake's tempo starts at 100 and is reported back through SetBeatInfo every frame)\n\n" );
+	const std::vector< Segment > steady120 = { { 1e9, Synth::Metronome, 120.0 } };
+
+	// A steady tempo is sent once, and only once it is detected.
+	double firstValue = 0.0;
+	{
+		const SendRun r = sendRun( steady120, 60.0, {} );
+		if( !r.received.empty() )
+			firstValue = r.received[ 0 ].second;
+		const bool    one = r.received.size() == 1;
+		Check( one && r.received[ 0 ].first >= 5.5 && r.received[ 0 ].first <= 7.0 &&
+				   std::fabs( r.received[ 0 ].second - 120.0 ) <= 0.5,
+			   "a metronome at 120 for 60 s: ONE send, once confirmed (three readings, about 6 s), within 0.5 of 120 (" +
+				   listSends( r.received ) + ")" );
+		Check( r.state == TempoSender::State::Taken && one && r.resolume == r.received[ 0 ].second,
+			   std::string( "  and Resolume took it: state " ) + stateName( r.state ) + ", the composition at " + F( r.resolume, 1 ) );
+		Check( one && r.received[ 0 ].second == std::round( r.received[ 0 ].second * 10.0 ) / 10.0,
+			   "  the value is rounded to 0.1 BPM" );
+	}
+
+	// Resolume already there: nothing to say. (The same run, so the same
+	// reading; the composition starts at the value the run above sent.)
+	{
+		const SendRun r = sendRun( steady120, 30.0, {}, [ & ]( double t, PatternPlugin&, FakeResolume& res ) {
+			if( t == 0.0 )
+				res.tempo = firstValue;
+		} );
+		Check( firstValue > 0.0 && r.received.empty() && r.state == TempoSender::State::Taken,
+			   std::string( "Resolume already at " ) + F( firstValue, 1 ) + ": nothing sent (" + listSends( r.received ) +
+				   "), state " + stateName( r.state ) );
+	}
+
+	// A change of tempo is one more send, after the detector has it.
+	{
+		const SendRun r = sendRun( { { 20.0, Synth::Metronome, 120.0 }, { 1e9, Synth::Metronome, 140.0 } }, 45.0, {} );
+		const bool    two = r.received.size() == 2;
+		Check( two && std::fabs( r.received[ 0 ].second - 120.0 ) <= 0.5 && r.received[ 1 ].first >= 20.0 &&
+				   r.received[ 1 ].first <= 30.0 && std::fabs( r.received[ 1 ].second - 140.0 ) <= 1.0,
+			   "120 for 20 s, then 140: TWO sends, the second within 10 s of the change (" + listSends( r.received ) + ")" );
+	}
+
+	// OSC Input off: the message goes four times, two seconds apart, then it
+	// gives up and says so.
+	{
+		const SendRun r = sendRun( steady120, 30.0, {}, []( double t, PatternPlugin&, FakeResolume& res ) {
+			if( t == 0.0 )
+				res.takes = false;
+		} );
+		bool spaced = r.received.size() == 1 + static_cast< size_t >( TempoSender::kMaxResends );
+		for( size_t i = 1; spaced && i < r.received.size(); ++i )
+			spaced = r.received[ i ].first - r.received[ i - 1 ].first >= TempoSender::kAckSeconds - 1e-9 &&
+					 r.received[ i ].second == r.received[ 0 ].second;
+		Check( spaced && r.state == TempoSender::State::NotTaken,
+			   std::string( "Resolume never takes it: 1 + 3 sends, 2 s apart, then NOT TAKEN (" ) + listSends( r.received ) +
+				   "; state " + stateName( r.state ) + ")" );
+	}
+
+	// It does not fight an operator: once taken, a hand on Resolume's tempo
+	// stays until the detected tempo moves.
+	{
+		const SendRun r = sendRun( steady120, 40.0, {}, []( double t, PatternPlugin&, FakeResolume& res ) {
+			if( std::fabs( t - 20.0 ) < 1e-9 )
+				res.tempo = 128.0;
+		} );
+		Check( r.received.size() == 1 && r.resolume == 128.0,
+			   "the operator sets 128 at 20 s: no send fights it (" + listSends( r.received ) + "; Resolume at " + F( r.resolume, 1 ) + ")" );
+	}
+
+	// When Lost. Hold sends nothing new; Default sends Default BPM before the
+	// lock and when the music stops.
+	const std::vector< Segment > thenSilence = { { 15.0, Synth::Metronome, 140.0 }, { 1e9, Synth::Silence, 0.0 } };
+	{
+		char   flagLive = '#', flagLost = '#';
+		double target   = -1.0;
+		const SendRun r = sendRun( thenSilence, 30.0, []( PatternPlugin& p ) { p.SetFloatParameter( PT_TEMPO_SOURCE, 1.0f ); },
+								   [ & ]( double t, PatternPlugin& p, FakeResolume& ) {
+			if( std::fabs( t - 14.5 ) < 1e-9 )
+				flagLive = headerFlag( p );
+			if( std::fabs( t - 29.0 ) < 1e-9 )
+			{
+				flagLost = headerFlag( p );
+				target   = p.State().TempoTarget();
+			}
+		} );
+		Check( r.received.size() == 1 && std::fabs( r.received[ 0 ].second - 140.0 ) <= 1.0,
+			   "When Lost = Hold, 140 then silence: one send, nothing when it stops (" + listSends( r.received ) + ")" );
+		Check( flagLive == '*' && flagLost == '?' && target == 0.0 && std::fabs( r.resolume - 140.0 ) <= 1.0,
+			   std::string( "  the header says " ) + flagLive + " while live and " + flagLost + " when lost; nothing to send (" +
+				   F( target, 1 ) + "), Resolume keeps " + F( r.resolume, 1 ) );
+	}
+	{
+		const SendRun r = sendRun( thenSilence, 30.0, []( PatternPlugin& p ) {
+			p.SetFloatParameter( PT_WHEN_LOST, 1.0f );
+			p.SetFloatParameter( PT_DEFAULT_BPM, 100.0f );
+		}, []( double t, PatternPlugin&, FakeResolume& res ) {
+			if( t == 0.0 )
+				res.tempo = 90.0;
+		} );
+		const bool three = r.received.size() == 3;
+		// The last frame with sound is 14.983 s; lost is more than 2 s after it.
+		Check( three && r.received[ 0 ].second == 100.0 && r.received[ 0 ].first == 0.0 &&
+				   std::fabs( r.received[ 1 ].second - 140.0 ) <= 1.0 && r.received[ 1 ].first <= 7.0 &&
+				   r.received[ 2 ].second == 100.0 && r.received[ 2 ].first > 15.0 - 1.0 / 60.0 + kTempoSilenceSeconds - 1e-9 &&
+				   r.received[ 2 ].first <= 15.0 + kTempoSilenceSeconds + 1.0,
+			   "When Lost = Default (100): 100 at once, 140 at the lock, 100 two seconds into the silence (" +
+				   listSends( r.received ) + ")" );
+	}
+
+	// Lost by staleness: a beat that turns into noise keeps sounding, so only
+	// the detector's silence on the matter can say so -- and a beat coming
+	// back ends it.
+	{
+		PatternPlugin p;
+		p.ForceSecondsClock();
+		p.SetFloatParameter( PT_TEMPO_SOURCE, 1.0f );
+		const std::vector< Segment > programme = { { 12.0, Synth::Metronome, 120.0 }, { 36.0, Synth::Noise, 0.0 },
+												   { 1e9, Synth::Metronome, 120.0 } };
+		float  bins[ kBins ];
+		double lostAt = -1.0, liveAgainAt = -1.0;
+		bool   liveBefore = false;
+		for( int f = 0; f < 48 * 60; ++f )
+		{
+			const double t = f / 60.0;
+			segmentBins( programme, f, 60.0, bins );
+			inject( p, bins );
+			p.Advance( t );
+			if( t > 11.0 && t < 12.0 )
+				liveBefore = p.State().TempoLive();
+			if( lostAt < 0.0 && t >= 12.0 && p.State().TempoLost() )
+				lostAt = t;
+			if( liveAgainAt < 0.0 && t >= 36.0 && p.State().TempoLive() )
+				liveAgainAt = t;
+		}
+		Check( liveBefore && lostAt > 12.0 && lostAt <= 12.0 + 6.0 + kTempoLostSeconds + 1.0,
+			   "a beat, then noise from 12 s: lost at " + F( lostAt, 2 ) + " s (no confirmation for " + F( kTempoLostSeconds, 0 ) +
+				   " s; the window holds beats for up to 6)" );
+		Check( liveAgainAt >= 36.0 && liveAgainAt <= 44.0, "  and the beat back at 36 s is live again at " + F( liveAgainAt, 2 ) + " s" );
+	}
+
+	// Music: the release video's groove at 125, at the video's 30 fps.
+	{
+		const Wav     wav = Groove::render( Groove::House, 125.0, 20.0 );
+		const SendRun r   = sendRun( wav, 30.0, 20.0, {} );
+		Check( r.received.size() == 1 && std::fabs( r.received[ 0 ].second - 125.0 ) <= 0.5 && r.received[ 0 ].first <= 7.0,
+			   "the release video's house groove at 125, 30 fps, rendered as audio: one send by 7 s, within 0.5 (" +
+				   listSends( r.received ) + ")" );
+	}
+
+	// Noise publishes tempos; Tempo Out must not send them. Steady noise as
+	// audio, twelve seeds x three filters x two frame rates, 60 s each.
+	auto noiseSends = []( bool unconfirmed, std::string& worst ) {
+		size_t total = 0, most = 0;
+		for( uint32_t salt = 1; salt <= 12; ++salt )
+			for( int type : { 0, 1, 2 } )
+			{
+				const Wav w = noiseWav( salt, type, 60.0 );
+				for( double fps : { 30.0, 60.0 } )
+				{
+					const SendRun r = sendRun( w, fps, 60.0, [ unconfirmed ]( PatternPlugin& p ) {
+						p.StateForTest().debug.unconfirmedTempo = unconfirmed;
+					} );
+					total += r.received.size();
+					if( r.received.size() > most )
+					{
+						most  = r.received.size();
+						worst = "seed " + std::to_string( salt ) + ", filter " + std::to_string( type ) + ", " + F( fps, 0 ) +
+								" fps: " + listSends( r.received );
+					}
+				}
+			}
+		return total;
+	};
+	{
+		std::string worst;
+		const size_t sent = noiseSends( false, worst );
+		Check( sent == 0, "72 runs of 60 s of steady noise as audio: " + std::to_string( sent ) + " sends" +
+							  ( sent ? " (worst: " + worst + ")" : std::string() ) );
+	}
+
+	// Off is off.
+	{
+		const SendRun r = sendRun( steady120, 20.0, []( PatternPlugin& p ) { p.SetFloatParameter( PT_SEND_TEMPO, 0.0f ); } );
+		Check( r.received.empty() && r.state == TempoSender::State::Off && TempoSender::Owner() == 0,
+			   std::string( "Send Tempo off: nothing sent, state " ) + stateName( r.state ) + ", no owner" );
+	}
+
+	// One sender per process.
+	{
+		FakeResolume                     resolume;
+		auto                             a = std::make_unique< PatternPlugin >();
+		auto                             b = std::make_unique< PatternPlugin >();
+		std::vector< PatternPlugin* >    both = { a.get(), b.get() };
+		std::vector< std::pair< double, double > > fromA, fromB;
+		a->tempoSinkForTest = [ & ]( double bpm ) { fromA.emplace_back( resolume.now, bpm ); resolume.tempo = bpm; return true; };
+		b->tempoSinkForTest = [ & ]( double bpm ) { fromB.emplace_back( resolume.now, bpm ); resolume.tempo = bpm; return true; };
+		for( PatternPlugin* p : both )
+		{
+			p->ForceSecondsClock();
+			p->SetFloatParameter( PT_SEND_TEMPO, 1.0f );
+		}
+		Synth m;
+		m.kind = Synth::Metronome;
+		m.bpm  = 120.0;
+		float bins[ kBins ];
+		auto  frame = [ & ]( int f, bool stepA ) {
+			const double t = f / 60.0;
+			resolume.now   = t;
+			m.bins( f, bins );
+			for( PatternPlugin* p : both )
+			{
+				if( p == a.get() && !stepA )
+					continue;
+				p->SetBeatInfo( static_cast< float >( resolume.tempo ), 0.0f );
+				inject( *p, bins );
+				p->Advance( t );
+				p->StepTempoSend( t );
+			}
+		};
+		for( int f = 0; f < 600; ++f )
+			frame( f, true );
+		Check( fromA.size() + fromB.size() == 1 &&
+				   ( a->Sender().GetState() == TempoSender::State::NotOwner ) != ( b->Sender().GetState() == TempoSender::State::NotOwner ),
+			   "two instances with Send Tempo on: one send between them, and one of them stands aside (A: " +
+				   listSends( fromA ) + "; B: " + listSends( fromB ) + ")" );
+		// A's clip stops: no more frames from it. After two seconds B takes over.
+		double takenAt = -1.0;
+		for( int f = 600; f < 900; ++f )
+		{
+			frame( f, false );
+			if( takenAt < 0.0 && b->Sender().GetState() != TempoSender::State::NotOwner )
+				takenAt = f / 60.0;
+		}
+		Check( takenAt >= 10.0 + TempoSender::kOwnerTimeout && takenAt <= 10.0 + TempoSender::kOwnerTimeout + 0.1,
+			   "  the owner's clip stops at 10 s: the other takes over at " + F( takenAt, 2 ) + " s" );
+		// And an owner that is destroyed lets go at once.
+		b.reset();
+		Check( TempoSender::Owner() == 0, "  a destroyed owner lets go at once" );
+	}
+
+	std::printf( "\n  negative controls -- must FAIL:\n" );
+	{
+		const SendRun r = sendRun( steady120, 60.0, []( PatternPlugin& p ) { p.SenderForTest().debug.noHysteresis = true; } );
+		Check( r.received.size() >= 10, "with no hysteresis the steady 120 is sent " + std::to_string( r.received.size() ) +
+											" times in 60 s, where the check above allows ONE" );
+	}
+	{
+		std::string worst;
+		const size_t sent = noiseSends( true, worst );
+		Check( sent > 0, "trusting every publication (unconfirmedTempo), the same noise sends " + std::to_string( sent ) +
+							 " tempos (most in one run -- " + worst + ")" );
+	}
+	return failures == 0 ? 0 : 1;
+}
+
+//---------------------------------------------------------------------------
+// --osc: the bytes, through a real UDP socket on 127.0.0.1
+//---------------------------------------------------------------------------
+namespace
+{
+/// The message Resolume was measured to take as an exact BPM, written out
+/// from the OSC 1.0 spec by hand rather than by calling the encoder:
+/// "/composition/tempocontroller/tempo" (34 chars, 2 NULs), ",sf" (1 NUL),
+/// "a" (3 NULs), then 120.0f big-endian, 0x42F00000.
+std::vector< uint8_t > expected120()
+{
+	std::vector< uint8_t > out;
+	const char* address = "/composition/tempocontroller/tempo";
+	for( const char* c = address; *c; ++c )
+		out.push_back( static_cast< uint8_t >( *c ) );
+	out.insert( out.end(), { 0, 0 } );
+	out.insert( out.end(), { ',', 's', 'f', 0 } );
+	out.insert( out.end(), { 'a', 0, 0, 0 } );
+	out.insert( out.end(), { 0x42, 0xF0, 0x00, 0x00 } );
+	return out;
+}
+
+std::string hex( const std::vector< uint8_t >& b )
+{
+	std::string out;
+	char        buffer[ 4 ];
+	for( uint8_t v : b )
+	{
+		std::snprintf( buffer, sizeof( buffer ), "%02x", v );
+		out += buffer;
+	}
+	return out;
+}
+
+/// A receiving socket on 127.0.0.1, on a port the kernel picks -- never
+/// Resolume's 7000.
+struct Listener
+{
+	int fd = -1, port = 0;
+	Listener()
+	{
+		fd = ::socket( AF_INET, SOCK_DGRAM, 0 );
+		sockaddr_in a{};
+		a.sin_family      = AF_INET;
+		a.sin_addr.s_addr = htonl( INADDR_LOOPBACK );
+		a.sin_port        = 0;
+		if( fd < 0 || ::bind( fd, reinterpret_cast< sockaddr* >( &a ), sizeof( a ) ) != 0 )
+			return;
+		socklen_t n = sizeof( a );
+		::getsockname( fd, reinterpret_cast< sockaddr* >( &a ), &n );
+		port = ntohs( a.sin_port );
+	}
+	~Listener()
+	{
+		if( fd >= 0 )
+			::close( fd );
+	}
+	/// One datagram, or empty after `seconds`.
+	std::vector< uint8_t > receive( double seconds )
+	{
+		timeval tv{};
+		tv.tv_sec  = static_cast< int >( seconds );
+		tv.tv_usec = static_cast< int >( ( seconds - tv.tv_sec ) * 1e6 );
+		::setsockopt( fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof( tv ) );
+		std::vector< uint8_t > buffer( 1024 );
+		const ssize_t          n = ::recv( fd, buffer.data(), buffer.size(), 0 );
+		buffer.resize( n > 0 ? static_cast< size_t >( n ) : 0 );
+		return buffer;
+	}
+};
+
+/// An OSC message read back by the spec, not by the encoder's code.
+struct Decoded
+{
+	bool        ok = false;
+	std::string address, tags, text;
+	float       value = 0.0f;
+};
+
+Decoded decode( const std::vector< uint8_t >& b )
+{
+	Decoded d;
+	size_t  at       = 0;
+	auto    readText = [ & ]( std::string& out ) {
+		size_t end = at;
+		while( end < b.size() && b[ end ] != 0 )
+			++end;
+		if( end >= b.size() )
+			return false;
+		out.assign( reinterpret_cast< const char* >( b.data() ) + at, end - at );
+		at = ( end + 4 ) & ~static_cast< size_t >( 3 );// past the NUL, to the next multiple of 4
+		for( size_t i = end; i < at; ++i )
+			if( i >= b.size() || b[ i ] != 0 )
+				return false;// padding must be NULs
+		return true;
+	};
+	if( !readText( d.address ) || !readText( d.tags ) || d.tags.empty() || d.tags[ 0 ] != ',' )
+		return d;
+	for( size_t i = 1; i < d.tags.size(); ++i )
+	{
+		if( d.tags[ i ] == 's' )
+		{
+			if( !readText( d.text ) )
+				return d;
+		}
+		else if( d.tags[ i ] == 'f' )
+		{
+			if( at + 4 > b.size() )
+				return d;
+			const uint32_t bits = ( uint32_t( b[ at ] ) << 24 ) | ( uint32_t( b[ at + 1 ] ) << 16 ) | ( uint32_t( b[ at + 2 ] ) << 8 ) |
+								  uint32_t( b[ at + 3 ] );
+			std::memcpy( &d.value, &bits, 4 );
+			at += 4;
+		}
+		else
+			return d;
+	}
+	d.ok = at == b.size();
+	return d;
+}
+
+/// One frame of the plugin with Default BPM as its target (When Lost =
+/// Default, no audio yet), so the send happens on frame one.
+void defaultFrame( PatternPlugin& p, double t )
+{
+	injectSilence( p );
+	p.SetBeatInfo( 100.0f, 0.0f );
+	p.Advance( t );
+	p.StepTempoSend( t );
+}
+
+PatternPlugin& armed( PatternPlugin& p, int port )
+{
+	p.ForceSecondsClock();
+	p.SetFloatParameter( PT_WHEN_LOST, 1.0f );
+	p.SetFloatParameter( PT_DEFAULT_BPM, 120.0f );
+	// The port before the switch, always: the switch on first would send to
+	// 7000, and a Resolume on this machine would take it.
+	p.SetFloatParameter( PT_OSC_PORT, static_cast< float >( port ) );
+	p.SetFloatParameter( PT_SEND_TEMPO, 1.0f );
+	return p;
+}
+} // namespace
+
+int runOsc()
+{
+	std::printf( "Tempo Out on the wire: the plugin's own socket to a listener on 127.0.0.1 (a kernel-chosen port,\n"
+				 "never 7000), the datagram compared byte for byte with the message written out from the OSC spec\n\n" );
+
+	Check( osc::Padded( 0 ) == 4 && osc::Padded( 1 ) == 4 && osc::Padded( 3 ) == 4 && osc::Padded( 4 ) == 8 && osc::Padded( 34 ) == 36,
+		   "OSC string padding: 0, 1, 3 -> 4; 4 -> 8 (the terminator is not optional); 34 -> 36" );
+	{
+		const auto bytes = osc::AbsoluteFloat( osc::kTempoAddress, 87.25f );
+		Check( bytes.size() == 48 && bytes[ 44 ] == 0x42 && bytes[ 45 ] == 0xAE && bytes[ 46 ] == 0x80 && bytes[ 47 ] == 0x00,
+			   "87.25 encodes as 42 ae 80 00 at bytes 44..47 of 48" );
+	}
+
+	Listener first, second;
+	if( first.port <= 0 || second.port <= 0 )
+	{
+		Check( false, "could not bind two listeners on 127.0.0.1" );
+		return 1;
+	}
+	{
+		PatternPlugin p;
+		armed( p, first.port );
+		defaultFrame( p, 0.0 );
+		const auto got = first.receive( 1.0 );
+		const auto want = expected120();
+		Check( got == want, "the plugin's datagram is the 48 bytes Resolume takes as 120 BPM exactly (" +
+								std::to_string( got.size() ) + " bytes: " + hex( got ) + ")" );
+		const Decoded d = decode( got );
+		Check( d.ok && d.address == "/composition/tempocontroller/tempo" && d.tags == ",sf" && d.text == "a" && d.value == 120.0f,
+			   "  read back by the spec: " + d.address + " " + d.tags + " \"" + d.text + "\" " + F( d.value, 2 ) );
+
+		// A new port: the next frame says it again, there.
+		p.SetFloatParameter( PT_OSC_PORT, static_cast< float >( second.port ) );
+		defaultFrame( p, 1.0 / 60.0 );
+		const auto moved = second.receive( 1.0 );
+		Check( moved == want, "OSC Port changed: the same 48 bytes arrive on the new port at once" );
+
+		// Off: silence on both.
+		p.SetFloatParameter( PT_SEND_TEMPO, 0.0f );
+		for( int f = 2; f < 200; ++f )
+			defaultFrame( p, f / 60.0 );
+		Check( first.receive( 0.2 ).empty() && second.receive( 0.2 ).empty(), "Send Tempo off: nothing more on either port" );
+	}
+
+	std::printf( "\n  negative control -- must FAIL:\n" );
+	{
+		PatternPlugin p;
+		armed( p, first.port );
+		p.debugPlainFloat = true;
+		defaultFrame( p, 0.0 );
+		const auto    got = first.receive( 1.0 );
+		const Decoded d   = decode( got );
+		Check( got != expected120() && d.ok && d.tags == ",f",
+			   "the plain-float form (`,f 120`, which Resolume reads as normalised and clamps to 500) fails the byte check (" +
+				   std::to_string( got.size() ) + " bytes, tags " + d.tags + ")" );
+	}
+	return failures == 0 ? 0 : 1;
+}
+
+//---------------------------------------------------------------------------
 // --names, --list, --font
 //---------------------------------------------------------------------------
 int runNames()
 {
 	PatternPlugin plugin;
-	std::printf( "names longer than FFGL's 16 characters, and duplicates:\n\n" );
+	std::printf( "names longer than FFGL's 16 characters, and duplicates -- as written, and as Resolume\n"
+				 "addresses them (lower case, no spaces: two names that reduce alike are ONE parameter there)\n\n" );
 	int                        bad = 0;
-	std::vector< std::string > seen;
+	std::vector< std::string > seen, reduced;
+	auto reduce = []( const char* name ) {
+		std::string out;
+		for( const char* c = name; *c; ++c )
+			if( *c != ' ' )
+				out += static_cast< char >( std::tolower( static_cast< unsigned char >( *c ) ) );
+		return out;
+	};
 	for( unsigned int id = 0; id < PT_COUNT_; ++id )
 	{
 		const char* name = plugin.GetParamName( id );
@@ -1768,7 +2423,13 @@ int runNames()
 			std::printf( "  %-3u  %-28s is a duplicate\n", id, name );
 			++bad;
 		}
+		else if( std::find( reduced.begin(), reduced.end(), reduce( name ) ) != reduced.end() )
+		{
+			std::printf( "  %-3u  %-28s reduces to '%s', which another name already does\n", id, name, reduce( name ).c_str() );
+			++bad;
+		}
 		seen.emplace_back( name );
+		reduced.emplace_back( reduce( name ) );
 		for( unsigned int e = 0; e < plugin.GetNumParamElements( id ); ++e )
 		{
 			const char* el = plugin.GetParamElementName( id, e );
@@ -1778,6 +2439,25 @@ int runNames()
 				++bad;
 			}
 		}
+	}
+
+	// What the host shows in place of a value, asked for every id with no
+	// host behind the plugin -- the SDK's own default would crash here.
+	{
+		std::string all;
+		for( unsigned int id = 0; id < PT_COUNT_; ++id )
+		{
+			const char* shown = plugin.GetParameterDisplay( id );
+			all += std::string( shown ? shown : "(null)" ) + "|";
+		}
+		const std::string bpm = plugin.GetParameterDisplay( PT_BPM );
+		plugin.SetFloatParameter( PT_BPM, 0.5f );
+		const std::string bpm130 = plugin.GetParameterDisplay( PT_BPM );
+		const bool ok = bpm == "125.0 BPM" && bpm130 == "130.0 BPM";
+		std::printf( "\n  the BPM slider shows \"%s\" by default and \"%s\" at 0.5 (every id answered: %zu characters)\n",
+					 bpm.c_str(), bpm130.c_str(), all.size() );
+		if( !ok )
+			++bad;
 	}
 	std::printf( "\n  %d problem(s)\n", bad );
 	return bad == 0 ? 0 : 1;
@@ -1790,7 +2470,7 @@ int runList()
 	for( unsigned int id = 0; id < PT_COUNT_; ++id )
 	{
 		const char* name = plugin.GetParamName( id );
-		if( id >= PT_ABOUT_TEXT )
+		if( IsAbout( id ) )
 		{
 			std::printf( "%-4u %-22s %-9s %10s   %-16s\n", id, name ? name : "", "about", "-", "-" );
 			continue;
@@ -2092,7 +2772,43 @@ int runGrid()
 		Check( same && l.scale == 1, "resize 640x360 -> 320x180 mid-run keeps every cell (now Scale 1)" );
 	}
 
+	// Hide Screen: every pixel transparent black -- over a magenta sentinel,
+	// so a frame the plugin skipped without clearing cannot pass -- while the
+	// listening carries on underneath.
+	auto notClear = []( const Image& img ) {
+		long n = 0;
+		for( size_t i = 0; i + 3 < img.px.size(); i += 4 )
+			n += ( img.px[ i ] | img.px[ i + 1 ] | img.px[ i + 2 ] | img.px[ i + 3 ] ) != 0 ? 1 : 0;
+		return n;
+	};
+	{
+		PatternPlugin p;
+		p.ForceSecondsClock();
+		p.SetBeatInfo( 125.0f, 0.0f );
+		p.SetFloatParameter( PT_HIDE_SCREEN, 1.0f );
+		Gl          gl( p, 640, 360 );
+		Screen      s;
+		Layout      l;
+		const Image img = renderGrid( p, gl, 90, s, l );
+		Check( notClear( img ) == 0 && writtenCells( p.State(), 64, 4 ) > 0,
+			   "Hide Screen: " + std::to_string( notClear( img ) ) + " of " + std::to_string( img.px.size() / 4 ) +
+				   " pixels not transparent black, and the drum pattern still wrote " +
+				   std::to_string( writtenCells( p.State(), 64, 4 ) ) + " cells underneath" );
+	}
+
 	std::printf( "\n  negative control -- must FAIL:\n" );
+	{
+		// What Hide Screen would leave if it returned without clearing: the
+		// sentinel the harness put there.
+		PatternPlugin p;
+		p.ForceSecondsClock();
+		p.SetFloatParameter( PT_HIDE_SCREEN, 1.0f );
+		Gl gl( p, 640, 360 );
+		p.DeInitGL();// ProcessOpenGL now returns before touching the target
+		const Image img = gl.frame( 0.0 );
+		Check( notClear( img ) > 0, "a frame nobody cleared is rejected (" + std::to_string( notClear( img ) ) +
+										" sentinel pixels, first " + img.str( 0, 0 ) + ")" );
+	}
 	{
 		PatternPlugin p;
 		p.ForceSecondsClock();
@@ -2320,8 +3036,8 @@ struct Session
 			}
 		}
 		std::map< std::string, unsigned int > byName;
-		for( unsigned int id = 0; id < PT_ABOUT_TEXT; ++id )
-			if( id != PT_AUDIO )
+		for( unsigned int id = 0; id < PT_COUNT_; ++id )
+			if( id != PT_AUDIO && !IsAbout( id ) )
 				if( const char* name = plugin.GetParamName( id ) )
 					byName[ name ] = id;
 		for( const auto& kv : o.sets )
@@ -2491,7 +3207,7 @@ int main( int argc, char** argv )
 	std::map< std::string, std::function< int() > > checks = {
 		{ "--timing", runTiming }, { "--onset", runOnset },       { "--prime", runPrime }, { "--pitch", runPitch },
 		{ "--ring", runRing },     { "--detected", runDetected }, { "--names", runNames }, { "--list", runList },
-		{ "--groove", runGroove },
+		{ "--groove", runGroove }, { "--send", runSend },     { "--osc", runOsc },
 		{ "--font", runFont },     { "--grid", runGrid },         { "--bench", runBench },
 	};
 
@@ -2571,7 +3287,7 @@ int main( int argc, char** argv )
 	}
 
 	std::printf( "usage: pntest --timing | --onset | --prime | --pitch | --ring | --detected | --groove\n"
-				 "              --names | --list | --font | --grid | --bench\n"
+				 "              --send | --osc | --names | --list | --font | --grid | --bench\n"
 				 "       pntest --tempo-wav f.wav [--truth BPM] [--from S] [--fps N] [--legacy]\n"
 				 "       pntest --out f.png [--size WxH] [--frames N] [--fps N] [--audio PRESET]\n"
 				 "              [--audio-bpm N] [--audio-until S] [--host-bpm N] [--set Name=value ...]\n"

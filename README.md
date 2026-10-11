@@ -12,7 +12,7 @@
 > grooves rendered as audio from 80 to 170 BPM, are detected to within
 > **±1 BPM at the right metrical level in 4.0 s** (`--detected`, `--groove`).
 > Each check carries a negative
-> control that must fail, and one does. Every one of the 17 controls is proven to
+> control that must fail, and one does. Every one of the 20 controls that draw is proven to
 > change the picture at two rasters, and the bundle registers, instantiates and
 > lights pixels under the fleet's oxbow host. **It has never been loaded into
 > Resolume on macOS**, and no real audio has reached it in a host: the release
@@ -115,6 +115,29 @@ schemes named by colour.
   C-1..B-3 is moved by octaves into it rather than shown as `---`).
 - **Display** — Theme (Grey / Blue / Green), Rows Visible (3–33), Show VU, Show
   Effects, Scale (whole pixels per screen pixel; 0 is the largest that fits).
+- **Tempo Out** *(after v0.1.1, unreleased; the last group, after About)* — Send
+  Tempo (push the detected tempo into Resolume's composition tempo over OSC),
+  OSC Port (Resolume's OSC input, 7000), Default BPM (60–200), When Lost (Hold /
+  Default), Hide Screen (a transparent output, so it can sit in a show).
+
+## Setting Resolume's tempo (Tempo Out, unreleased)
+
+FFGL lets a plugin read the host's tempo but never set it, so with **Send Tempo**
+on Pattern sends the tempo it hears to Resolume's own OSC input on 127.0.0.1:
+`/composition/tempocontroller/tempo` in Resolume's absolute form (`,sf "a" 125.0`),
+because a plain float there is read as 0..1 over 20..500 BPM — a plain `120`
+sets 500, measured in Arena 7.27.1. **Resolume's OSC Input is off by default**
+(Preferences → OSC). What goes out is the *confirmed* tempo (three detector
+readings in a row that agree, about six seconds into a steady beat), rounded to
+0.1 BPM, on a change of 0.5 BPM or more, at most once a second, resent at most
+three times if Resolume's tempo (read back through `SetBeatInfo`) does not
+follow. One instance per Resolume sends. **When Lost** decides what happens two
+seconds into silence or eight without a confirmation: Hold (send nothing) or
+Default (send Default BPM). It sends the detector's mistakes too — a breakbeat
+or an off-beat bass at 80–90 can set Resolume to half or double — and a music
+clip on BPM Sync transport would hear every change it makes, so keep music on
+Timeline. The user guide has the set-up, the status row and the caveats. **The
+plugin itself has never sent a tempo to a Resolume.**
 
 ## What it reads, and what is assumed
 
@@ -187,7 +210,24 @@ Verified, by measurement on this machine (Apple Silicon, macOS 26.4), with
   theme background, and the probed cells equal the font table bit for bit. A
   fractional scale fails on 576 glyph pixels; a one-row shift in the shader
   (the mutation test) fails 36 assertions.
-- **No dead controls.** All 17 change the picture at 640×360 and at 320×180.
+- **No dead controls.** All 20 that draw change the picture at 640×360 and at
+  320×180; Send Tempo and OSC Port are not swept (on, the render would send to
+  port 7000) and are measured by `--send` and `--osc` instead.
+- **Tempo Out** *(unreleased)*, against a fake Resolume (`--send`): a metronome
+  at 120 is sent once in 60 s, at 6.00 s; 120 then 140 is two sends; a
+  Resolume that never takes it gets 1 + 3 sends two seconds apart and then
+  `NOT TAKEN`; a hand on Resolume's tempo is not fought; Hold sends nothing when
+  the music stops and Default sends Default BPM 2 s into the silence; two
+  instances send once between them and the second takes over 2 s after the
+  first's clip stops; the release video's groove at 30 fps is sent once, 124.8
+  at 6 s; 72 one-minute runs of steady noise as audio send nothing. With no
+  hysteresis the metronome is sent 54 times; trusting every detector
+  publication, the noise sends 82 tempos. On the wire (`--osc`): the plugin's
+  own socket delivers exactly the 48 bytes of `,sf "a" 120.0` to a listener on
+  127.0.0.1 (never 7000), follows an OSC Port change at once, and sends nothing
+  when off; the plain-float form fails the byte check.
+- **Hide Screen** leaves every one of 230,400 pixels transparent black while
+  the pattern carries on underneath (`--grid`).
 - **The pipe.** Three 64×36 frames are 27,648 bytes; a reader that hangs up
   gets exit status 1, not SIGPIPE's 141.
 - **Cost**, `pntest --bench` (fastest of five passes of 200 frames, the drum
@@ -200,8 +240,13 @@ Verified, by measurement on this machine (Apple Silicon, macOS 26.4), with
 Not verified, and not pretended:
 
 - **Never loaded into Resolume on macOS.** Everything above is the offline
-  harness driving the real plugin class in a headless GL context. How 17
-  controls in three groups present in the inspector there is untested.
+  harness driving the real plugin class in a headless GL context. How 22
+  controls in four groups present in the inspector there is untested.
+- **Tempo Out has never sent a tempo to a Resolume.** The message form was
+  measured in Arena 7.27.1 on Windows by sending it from outside the plugin;
+  the plugin's own send, Resolume reporting the new tempo back through
+  `SetBeatInfo`, a clip at zero opacity still running, and Hide Screen under
+  Resolume's blend modes are all unmeasured.
 - **No real audio has reached it in a host.** The 64 bins' layout, value law and
   sample rate are assumed (`Bin Law`, `Bin Value`, `SetSampleRate`), and the
   onset detector's thresholds were set on synthetic spectra and synthesised
@@ -285,7 +330,7 @@ line.
 
 ## Building and testing
 
-The offline harness drives the real plugin class. Nine of its ten check groups
+The offline harness drives the real plugin class. Eleven of its twelve check groups
 open **no GL context at all**, because the claims they make are claims about the
 tracker's published state and a rasteriser has no opinion about those:
 
@@ -296,6 +341,8 @@ tracker's published state and a rasteriser has no opinion about those:
     ./build/pntest --ring          # the next pass overwrites, clears or keeps
     ./build/pntest --detected      # a metronome within +-1 BPM in 4 s
     ./build/pntest --groove        # drum grooves as audio, 80..170 BPM, the right metrical level
+    ./build/pntest --send          # Tempo Out: what is sent to Resolume and when (a fake Resolume)
+    ./build/pntest --osc           # Tempo Out: the exact bytes, through a socket on 127.0.0.1
     ./build/pntest --grid          # and the one check that reads a rasteriser
     ./build/pntest --bench         # 720p through 4K
     ./build/pntest --out /tmp/f.png --size 1920x1080 --frames 300 --audio beats --host-bpm 125
@@ -326,7 +373,9 @@ pattern writes a plain-text log every time it runs:
 
 It records the build, the GL driver, what unit the host's clock turned out to
 be, whether any audio reached the layer, and which tempo the clock is following
-— the first two of which are the commonest reasons a pattern never fills.
+— the first two of which are the commonest reasons a pattern never fills — and,
+once Send Tempo has been on, each change in what Tempo Out is doing (lines start
+`tempo out:`).
 
 <!-- attributions:start -->
 This project is built on other people's work — see [ATTRIBUTIONS.md](ATTRIBUTIONS.md).

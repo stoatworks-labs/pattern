@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include "tracker/Tracker.h"
@@ -22,7 +23,8 @@
 	gutter right and below. The layout in cells, top to bottom:
 
 	    row 0    POS pp PAT pp BPM bbb SPD ss       the counters
-	    row 1    blank
+	    row 1    blank, or Tempo Out's state while Send Tempo is on, e.g.
+	             OSC 7000 125.0 OK (Pattern.cpp, TempoOutStatus)
 	    6 rows   the VU bars, if Show VU (48 pixels: one per meter step)
 	    N rows   the pattern, Rows Visible of them, the cursor row at the
 	             centre (index N / 2), rows wrapping past the pattern end
@@ -73,6 +75,8 @@ struct DisplaySettings
 	int  rowsVisible = 17;
 	bool showVu      = true;
 	bool showEffects = true;
+	/// Row 1's text, or empty for a blank row. Clipped to the screen's width.
+	std::string status;
 };
 
 struct Screen

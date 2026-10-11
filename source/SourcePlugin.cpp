@@ -34,7 +34,10 @@ static CFFGLPluginInfo PluginInfo(
 	"from the onset's strength, its sample number from the channel. After row 3F the cursor wraps and the next "
 	"pass overwrites the last, so a busy passage fills every row and a sparse one leaves dots.\n\n"
 	"VU bars per channel with a vblank meter's fall rate, position and pattern counters, three colour themes, "
-	"a bitmap font on a whole-pixel grid. Four or eight channels, 64 or 32 rows.",// Plugin description
+	"a bitmap font on a whole-pixel grid. Four or eight channels, 64 or 32 rows.\n\n"
+	"Tempo Out: with Send Tempo on, the detected tempo is sent to Resolume's own composition tempo over OSC "
+	"(switch on Preferences > OSC > OSC Input first). Hide Screen makes the output transparent, so it can "
+	"sit in a show and just listen.",// Plugin description
 	"Pattern FFGL source"                                    // About
 );
 

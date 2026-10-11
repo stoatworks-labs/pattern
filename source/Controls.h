@@ -16,7 +16,8 @@
 	  parameter that means anything else is mapped here, in a named inline
 	  function, and nowhere else.
 	- **`FF_TYPE_INTEGER` holds a real integer** with a real range: Speed,
-	  Rows Visible and Scale are counts, and the clamp does not apply to them.
+	  Rows Visible and Scale are counts, OSC Port is a port and Default BPM a
+	  whole tempo, and the clamp does not apply to them.
 	- **`FF_TYPE_OPTION` holds the element VALUE**, which for every dropdown
 	  here is its index. Its SDK range reads back 0..1 whatever the element
 	  count (the fleet trap); `ToOption` in Pattern.cpp accepts either an index
@@ -33,6 +34,16 @@
 	collapses *runs* of the same group name into one fold, so an id moved out
 	of its run splits its group in two. The enum below is the inspector, top
 	to bottom.
+
+	## Released ids never move
+
+	FFGL's ABI addresses a parameter by its index. Resolume Arena saves and
+	restores by NAME (measured across the fleet), but other hosts may not, so
+	every id released in v0.1.x keeps its number and the Tempo Out group is
+	appended AFTER the About block, in a run of its own -- which is why About
+	is no longer last. A change in the generated About block's size would
+	shift the Tempo Out ids; `Pattern.cpp` static_asserts the block so that
+	cannot happen silently.
 
 	## Names
 
@@ -80,8 +91,34 @@ enum ParamId : FFUInt32
 	PT_ABOUT_BUTTON_3,
 	PT_ABOUT_BUTTON_4,
 
+	// -- Tempo Out (after v0.1.1, appended: see "Released ids never move") -----
+	// Pushes the detected tempo into Resolume's composition tempo over OSC.
+	// See OscSend.h for the message and TempoSender for when it is sent.
+	PT_SEND_TEMPO, ///< boolean, off: nothing is sent until the operator says so
+	PT_OSC_PORT,   ///< integer: Resolume's OSC input port, on 127.0.0.1
+	PT_DEFAULT_BPM,///< integer BPM: before the first confirmation, and when lost
+	PT_WHEN_LOST,  ///< option: Hold the last tempo, or go to Default BPM
+	PT_HIDE_SCREEN,///< boolean: a transparent output, so it can sit in a show
+
 	PT_COUNT_
 };
+
+/// The About block's id range. It is no longer the end of the list.
+constexpr FFUInt32 kAboutFirst = PT_ABOUT_TEXT;
+constexpr FFUInt32 kAboutLast  = PT_ABOUT_BUTTON_4;
+inline bool IsAbout( FFUInt32 id )
+{
+	return id >= kAboutFirst && id <= kAboutLast;
+}
+
+/// What the tempo becomes when the detector has lost the beat.
+enum class WhenLost : int
+{
+	Hold = 0,///< send nothing new: Resolume keeps the last tempo it was given
+	Default, ///< go to Default BPM
+	Count
+};
+constexpr int kWhenLostCount = static_cast< int >( WhenLost::Count );
 
 /// Where the row clock's tempo comes from.
 enum class TempoSource : int
@@ -168,5 +205,13 @@ inline constexpr float kBandSplitDefault = 0.4f;
 inline constexpr int kSpeedMin = 1, kSpeedMax = 31, kSpeedDefault = 6;
 inline constexpr int kRowsVisibleMin = 3, kRowsVisibleMax = 33, kRowsVisibleDefault = 17;
 inline constexpr int kScaleMin = 0, kScaleMax = 8, kScaleDefault = 0;///< 0 is Auto
+
+/// Resolume's OSC input port. 7000 is its default; the input itself is OFF by
+/// default (Preferences > OSC), which the guide says first.
+inline constexpr int kOscPortMin = 1024, kOscPortMax = 65535, kOscPortDefault = 7000;
+
+/// Default BPM: the detector's range, whole tempos. 120 because the issue
+/// asked for it and the SDK's own idea of a host that never said is 120.
+inline constexpr int kDefaultBpmMin = 60, kDefaultBpmMax = 200, kDefaultBpmDefault = 120;
 
 } // namespace pattern

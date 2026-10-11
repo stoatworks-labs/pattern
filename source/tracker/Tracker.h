@@ -117,6 +117,45 @@
 	stands in. `debug.legacyTempo` runs v0.1.0's
 	detector, and `pntest --groove` requires it to fail.
 
+	## Confirmed, live and lost (Tempo Out)
+
+	A publication is good enough for the row clock, which a wrong tempo only
+	makes look wrong. It is not good enough to set a show's master tempo, and
+	two facts measured here say so:
+
+	- **Noise publishes.** Steady filtered noise rendered as audio (72 runs of
+	  60 s: twelve seeds, low-, high- and band-pass, 30 and 60 fps) published
+	  a tempo in most runs, at peak correlations of 0.20 to 0.37, and twice
+	  confirmed itself into a run of three.
+	- **A window that straddles a change publishes something in between.**
+	  A metronome at 120 turning into noise published 117.72 at R 0.475 as the
+	  window filled; a metronome going silent drifted from 140 to 141.2.
+
+	So Tempo Out trusts a CONFIRMED tempo: three publications in three
+	consecutive detection cycles (a second apart), each with R at least
+	`kTempoTrustR` (0.3) and each made with sound in the last second, all
+	within the 2 % agreement -- and the tempo is their mean. Over the same 72
+	noise runs that is 0 confirmations (5 at R 0.2); every one of the 45
+	asserted grooves and the release video's soundtrack confirm, the
+	soundtrack from 6 s. The cost is two seconds: a steady beat is first
+	confirmed at about 6 s, not 4. (The breakbeat and the house groove at
+	160 on 30 fps never confirm, and a confirmation is still at whatever
+	metrical level the detector chose: house at 80 and 90 confirm 160 and
+	180, as they read.) `debug.unconfirmedTempo` trusts every publication
+	instead, and `pntest --send` requires noise to get through with it.
+
+	The tempo is LIVE while confirmations keep coming (one within
+	`kTempoLostSeconds`) and there has been sound within
+	`kTempoSilenceSeconds`; once confirmed and no longer live it is LOST.
+	The header shows `*` only while live, and `?` otherwise.
+
+	`TempoTarget()` is what Tempo Out sends: the confirmed tempo while live;
+	otherwise Default BPM when When Lost says Default, else 0 -- Hold sends
+	nothing new, so Resolume keeps the last tempo it was given. Detected's
+	row clock follows `TempoTarget()` under Default; under Hold, the default,
+	it is exactly the v0.1.1 clock (the latest publication, the host's tempo
+	before one).
+
 	## VU
 
 	A note sets its channel's meter to volume / 64 of 48 steps, and the meter
@@ -143,6 +182,8 @@ struct TrackerSettings
 	double gamma       = 2.2; ///< band split exponent
 	bool   fold        = true;
 	double sampleRate  = 44100.0;
+	double fallbackBpm = 120.0;///< Default BPM
+	int    whenLost    = 0;    ///< 0 hold, 1 go to fallbackBpm
 };
 
 /// The negative controls. None is reachable from a parameter.
@@ -155,6 +196,7 @@ struct TrackerDebug
 	bool   legacyTempo = false;///< v0.1.0's detector: the raw summed flux, the best lag, a half at 70 %
 	bool   levelDetector = false;///< fires on level, not change: no memory, no rising-edge test
 	double detuneSemitones = 0.0;///< every pitch read this many semitones off
+	bool   unconfirmedTempo = false;///< Tempo Out trusts every publication, not a confirmed run
 };
 
 struct Cell
@@ -189,6 +231,12 @@ constexpr double kTempoPriorBpm  = 120.0;///< the family prior's centre
 constexpr double kTempoPriorOct  = 1.0; ///< and its width, in octaves
 constexpr int    kTempoMaxLag    = 302; ///< samples of autocorrelation kept (3 s)
 constexpr double kTempoAgree     = 0.02;///< two readings in a row within this ratio publish
+constexpr int    kTempoConfirmRun     = 3;   ///< publications in consecutive cycles to confirm
+constexpr double kTempoTrustR         = 0.3; ///< each with at least this peak correlation
+constexpr double kTempoQuietSeconds   = 1.0; ///< and sound no longer ago than this
+constexpr double kTempoLostSeconds    = 8.0; ///< without a confirmation: lost
+constexpr double kTempoSilenceSeconds = 2.0; ///< of silence: lost
+constexpr double kSoundLevel          = 1e-6;///< a bin above this is sound (the log's own test)
 
 class Tracker
 {
@@ -220,6 +268,16 @@ public:
 	double  TempoMemberBpm( int i ) const { return mMemberBpm[ i ]; }
 	double  TempoMemberShare( int i ) const { return mMemberShare[ i ]; }
 	bool    TempoSettled() const { return mDetectedBpm > 0.0; }
+	/// The last confirmed tempo (see "Confirmed, live and lost"), or 0.
+	double  ConfirmedBpm() const { return debug.unconfirmedTempo ? mDetectedBpm : mConfirmedBpm; }
+	/// Confirmations coming and sound playing: the header's `*`.
+	bool    TempoLive() const;
+	/// Confirmed once, and no longer live.
+	bool    TempoLost() const { return ConfirmedBpm() > 0.0 && !TempoLive(); }
+	/// What Tempo Out sends; 0 for nothing.
+	double  TempoTarget() const;
+	double  LastPublishAt() const { return mLastPublishAt; }
+	double  LastConfirmAt() const { return mLastConfirmAt; }
 	double  RawPhase() const { return mRawPhase; }
 	int     BandEdge( int k ) const { return mEdges[ k ]; }
 	int     Vu( int channel ) const;
@@ -238,6 +296,7 @@ private:
 	void   FeedTempo( double seconds, const double* bandFlux );
 	void   DetectTempo();
 	void   DetectTempoLegacy( int n );
+	void   Confirm();
 	void   ClearRow( int row );
 
 	TrackerSettings mSettings;
@@ -279,6 +338,13 @@ private:
 	int64_t mLastDetectSec = -1;
 	double  mDetectedBpm   = 0.0;
 	double  mCandidateBpm  = 0.0;///< the last reading, published once the next agrees
+	double  mLastPublishAt = 0.0;///< seconds: the last publication, a new tempo or the same again
+	double  mLastSoundAt   = 0.0;///< seconds: the last frame with any bin above kSoundLevel
+	bool    mPublished     = false;///< this detection cycle published
+	double  mRun[ kTempoConfirmRun ] = {};///< the latest publications in a run, oldest first
+	int     mRunCount      = 0;
+	double  mConfirmedBpm  = 0.0;
+	double  mLastConfirmAt = 0.0;
 	double  mPeakR         = 0.0;
 	int     mMemberCount   = 0;
 	double  mMemberBpm[ 5 ]   = {};

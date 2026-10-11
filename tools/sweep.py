@@ -37,6 +37,20 @@ first match. `pntest --names` fails on a duplicate for that reason.
 
 **Never sweep the About block.** Those are buttons that open a web browser.
 `pntest --list` marks them, and marks the audio buffer, which the host writes.
+
+**Never sweep Send Tempo or OSC Port.** Send Tempo on makes the render send a
+UDP datagram to 127.0.0.1 -- on 7000, Resolume's own OSC port, and a Resolume
+on this machine would take the tempo. Their only mark on the picture is the
+status row, and what they are for is measured where it can be: `pntest
+--send` (the policy, against a fake Resolume) and `pntest --osc` (the bytes,
+through a socket the harness owns, never 7000).
+
+**Default BPM and When Lost act on Detected's clock before a confirmation.**
+Four seconds of the drum pattern is before the detector has confirmed
+anything (about six), so with Tempo Source on Detected and When Lost on
+Default the clock runs on Default BPM: 60 against 200 is a different row.
+When Lost is swept with Default BPM at 200, against Hold's clock on the
+SDK's 120.
 """
 import argparse
 import concurrent.futures
@@ -55,7 +69,10 @@ SCRATCH = tempfile.mkdtemp(prefix="pnsweep")
 WIDTH, HEIGHT = 640, 360
 FRAMES = 240          # four seconds at 60 fps
 
-SKIP = {}
+SKIP = {
+    "Send Tempo": "sends UDP to 127.0.0.1:OSC Port when on -- measured by pntest --send and --osc instead",
+    "OSC Port": "only where Send Tempo sends; measured by pntest --osc against its own listener",
+}
 
 MANUAL = {"Tempo Source": 2}
 
@@ -80,6 +97,9 @@ CONTEXT = {
     "Show VU": {},
     "Show Effects": {},
     "Scale": {},
+    "Default BPM": {"Tempo Source": 1, "When Lost": 1},
+    "When Lost": {"Tempo Source": 1, "Default BPM": 200},
+    "Hide Screen": {},
 }
 
 

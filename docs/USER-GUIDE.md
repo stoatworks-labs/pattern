@@ -28,7 +28,8 @@ blue row is the cursor.*
 > × 180, at Scale 1 to 4 and Auto, every scaled block is one colour and every probed glyph
 > matches the font table bit for bit. Eight deliberate faults are shown to make those checks
 > fail (one of them is v0.1.0's own tempo detector), and a one-character change to the shipped
-> shader fails 36 assertions. All 17 controls are shown to change the picture. It has **never
+> shader fails 36 assertions. All 20 controls that draw are shown to change the picture (Send
+> Tempo and OSC Port, which only send, are checked against a socket the harness owns). It has **never
 > been loaded into Resolume on macOS**, and **no real audio has reached it in a host**: the
 > one host it has run in there is the fleet's own test host, `oxbow`. On Windows, a build of
 > v0.1.0 (the same code but for the tempo detector) loads, registers as a source and renders
@@ -37,6 +38,11 @@ blue row is the cursor.*
 > box has no sound device, so its 12 audio-driven controls were not exercised there, and the
 > Manual BPM could not be shown moving on the gate's still picture (it changes three digits in
 > the header). Try it on a spare layer before you put it in a show.
+>
+> **Tempo Out is newer than v0.1.1 and not in a release yet.** What it sends was measured
+> against Resolume Arena 7.27.1 by sending the same message from outside the plugin; the plugin
+> itself has never sent anything to a Resolume, and nothing has checked that Resolume reports its
+> new tempo back to the plugin. See [Tempo Out](#tempo-out-setting-resolumes-tempo).
 >
 > This codebase was created with AI assistance, directed and reviewed by a human author.
 
@@ -117,8 +123,11 @@ Then:
    moves the boundaries between channels towards or away from the low end.
 6. **Tempo Source → Manual** and the cursor runs on the BPM slider, whatever Resolume or the
    music is doing.
+7. **Send Tempo on** (after switching on Resolume's OSC input, see Tempo Out) and Resolume's
+   own tempo follows the music. **Hide Screen on** and the layer shows nothing while it does.
 
-Every slider is declared to the host as 0 to 1, except the three counts, which are integers.
+Every slider is declared to the host as 0 to 1, except Speed, Rows Visible, Scale, OSC Port and
+Default BPM, which are integers.
 The value each position stands for is given with each control below.
 
 ---
@@ -131,7 +140,8 @@ plugin's own estimate from the audio (see below); Manual is the **BPM** slider. 
 rate-locked only: row 0 is wherever the clip started, not the host's downbeat.
 
 **BPM** — 60 to 200 (0 to 1 is 60 + 140 × the slider; 125 by default). Used only when Tempo
-Source is Manual.
+Source is Manual. Resolume should show the slider in BPM ("125.0 BPM") rather than as 0 to 1;
+that has not been seen in a Resolume yet.
 
 **Speed** — **1 to 31**, an integer, **6 by default**. Ticks a row; a tick is 2.5 / BPM
 seconds, so a row is Speed × 2.5 / BPM seconds and at 6 there are four rows a beat. The header
@@ -209,8 +219,9 @@ is centred and cropped. Scaling is always by whole pixels, so every glyph edge i
 ## The header
 
 `POS` and `PAT` count passes (the pass modulo 128 and 64, in hex); there is no song and no
-order list. `BPM` is the tempo the clock is running on, with `*` after it when Detected has
-settled and `?` while it has not. `SPD` is the Speed.
+order list. `BPM` is the tempo the clock is running on, with `*` after it (Tempo Source on
+Detected) while the detected tempo is confirmed and live, and `?` otherwise. `SPD` is the Speed.
+With Send Tempo on, the row under the header shows Tempo Out's state (see Tempo Out).
 
 ---
 
@@ -265,9 +276,15 @@ last six seconds for the period that repeats best together with its subdivision 
 grouping, and takes the fastest level that holds up: the beat rather than the half note, and
 the beat rather than the eighths. A reading is used only when the one before it agrees within
 2 %, so the first appears after about four seconds and a single stray reading never moves the
-clock. The row clock follows the estimate, re-anchoring the phase each time it changes, and
-the header shows `?` until it has settled and `*` after. The three registers are fixed: the
-Channels and Band Split controls do not change what the tempo detector hears.
+clock. The row clock follows the estimate, re-anchoring the phase each time it changes. The
+three registers are fixed: the Channels and Band Split controls do not change what the tempo
+detector hears.
+
+The header's `*` means the tempo is **confirmed and live**: three readings in a row, a second
+apart, that agree within 2 % and were each made on clear evidence while something was playing
+(about six seconds into a steady beat). It turns back to `?` when the music has been silent for
+two seconds, or when nothing has been confirmed for eight. This is the tempo Tempo Out trusts
+(below); the clock itself still follows the latest reading, as it always has.
 
 Measured, through the offline harness's own FFT (not Resolume's):
 
@@ -288,11 +305,113 @@ loud kick outweighed the clap, and it read **62** for the video's 125 BPM groove
 backbeat at 80 and 200 for one at 100. v0.1.1 replaces it; if you set up a show with v0.1.0
 and switched to Host because of this, Detected is worth another try.
 
+**Noise publishes.** Steady noise, played as audio, gets a tempo out of the detector now and
+then (in most of 72 one-minute runs of filtered noise, always on weak evidence). The clock
+follows it; Tempo Out does not, because those readings never confirm.
+
 **Still wrong, and printed by the harness rather than hidden:** a breakbeat with ghost snares
 and sixteenth hats reads double at 80 BPM and half from 140 to 170; a four-on-the-floor with
 an off-beat bass reads double at 80 and 90, because its eighths really are a pulse at twice
 the tempo. Nothing has been measured through Resolume's own FFT. For such material, and for
 anything the show depends on, use Host or Manual.
+
+---
+
+## Tempo Out: setting Resolume's tempo
+
+*Added after v0.1.1; not in a release yet.*
+
+With **Send Tempo** on, Pattern pushes the tempo it hears into Resolume's own composition tempo,
+so the BPM-synced parts of a show follow the music without anyone typing a BPM. It can sit on a
+layer of its own doing nothing else: **Hide Screen** makes its output transparent.
+
+FFGL gives a plugin no way to set anything in its host, so this goes the way any controller's
+would: one OSC message to Resolume's OSC input on this machine (127.0.0.1).
+
+### Setting it up
+
+1. **Switch on Resolume's OSC input: Preferences → OSC → OSC Input.** It is **off by default**,
+   and with it off nothing Pattern sends arrives. Its port is 7000 unless you have changed it.
+2. Put **SW Pattern** on a layer of its own and set its **Audio** input (in the Listening group)
+   to what the tempo should be taken from: **Composition** for whatever is playing in Resolume,
+   **External** for the audio input.
+3. Set **OSC Port** to Resolume's OSC input port if it is not 7000.
+4. Turn **Send Tempo** on. Turn **Hide Screen** on if the layer should show nothing.
+5. Keep the clip playing. A clip that is not playing is not running, and nothing is sent.
+
+The Tempo Out group is the last in the inspector, after About.
+
+With Hide Screen off, the row under the header says what Tempo Out is doing:
+
+| row | meaning |
+| --- | --- |
+| `OSC 7000 WAITING` | on, nothing confirmed yet, and When Lost is Hold |
+| `OSC 7000 125.0 SENT` | sent; Resolume's tempo has not come back yet |
+| `OSC 7000 125.0 OK` | Resolume's tempo is 125.0 |
+| `OSC 7000 125.0 NOT TAKEN` | sent four times and Resolume's tempo never changed: OSC Input is off, or on another port |
+| `OSC 7000 SEND FAILED` | the network refused the message (the log says why) |
+| `OSC 7000 ANOTHER SENDS` | another SW Pattern is already sending; this one stays quiet |
+
+The log says the same in sentences (see [If it looks wrong](#if-it-looks-wrong)).
+
+### What it sends, and when
+
+- **The confirmed tempo** (see Detected tempo): three readings in a row that agree, averaged. On
+  a steady beat that is about six seconds after it starts.
+- **Rounded to 0.1 BPM, and only when it moves by at least 0.5 BPM** from the last value sent,
+  and never more than once a second. A settled reading wobbles by a few tenths; Resolume's tempo
+  does not wobble with it.
+- **Nothing if Resolume is already there.** Pattern reads Resolume's tempo back through the
+  beat information Resolume gives every plugin. If it has not changed to what was sent within two
+  seconds, the message is sent again, at most three more times, and then the row says
+  `NOT TAKEN`.
+- **It does not fight you.** Once Resolume has taken a tempo, change it by hand and it stays
+  changed until the music's tempo itself moves.
+- **One sender.** If several SW Pattern clips have Send Tempo on, the first one to run sends and
+  the others stand aside. If its clip stops, another takes over after two seconds.
+- The message is `/composition/tempocontroller/tempo` in Resolume's absolute form (the string
+  `a`, then the BPM), so the value arrives as the BPM itself, fractions included. A plain number
+  at that address is read by Resolume as 0 to 1 over its 20 to 500 BPM range, so a plain `120`
+  would set 500: measured in Arena 7.27.1.
+
+**Tempo Source does not matter to Tempo Out**: whatever the row clock follows, what is sent is
+the detected tempo. With Send Tempo on, Host and Detected end up the same anyway.
+
+### When the beat is lost
+
+The tempo is **lost** when the music has been silent for two seconds, or nothing has been
+confirmed for eight (noise, speech, a breakdown with no pulse). **When Lost** decides what
+happens then:
+
+- **Hold** (the default): nothing is sent, and Resolume keeps the last tempo it was given.
+- **Default**: **Default BPM** (60 to 200, 120 by default) is sent, once. It is also what is sent
+  before anything has been confirmed, so Resolume starts at Default BPM. With When Lost on
+  Default the row clock (on Detected) runs on Default BPM too while the tempo is lost.
+
+### Hide Screen
+
+On, the output is transparent black and nothing is drawn, so under Resolume's Alpha or Add blend
+the layer should add nothing. Everything else carries on: the listening, the clock and Tempo
+Out. Leave the layer's opacity up: whether Resolume still runs a clip on a layer at zero opacity,
+or bypassed, has not been checked, and a clip that does not run sends nothing.
+
+### Before you rely on it
+
+- **It sends whatever the detector confirms, including its mistakes.** A breakbeat with ghost
+  snares reads double at 80 BPM and half from 140 to 170; a four-on-the-floor with an off-beat
+  bass reads double at 80 and 90 (see Detected tempo). Tempo Out would set Resolume to that
+  half or double tempo. For such music, set the tempo yourself.
+- **Keep music clips on Timeline transport, not BPM Sync.** A clip on BPM Sync plays faster or
+  slower when the composition's tempo changes. If Pattern is listening to that clip, every tempo
+  it sends changes what it hears, and a misread tempo can feed on itself.
+- **With Ableton Link on in Resolume**, a tempo set this way will probably move every other app
+  in the Link session too. Not checked.
+- **Nothing here has met Resolume's own audio.** The detector has been measured on rendered
+  grooves and a synthesised track through the harness's FFT, never on music through Resolume's.
+- **The plugin has never sent a tempo to a Resolume.** The message itself was checked by hand
+  against Arena 7.27.1 on Windows. The plugin's own sending, Resolume reporting the new tempo
+  back to it, Hide Screen under Resolume's blend modes, and how the controls look in the
+  inspector have not been seen in a Resolume yet.
 
 ---
 
@@ -346,6 +465,15 @@ many rows visible. Fewer rows, four channels, or Show Effects off make it fit la
 **SW Pattern is not under Sources.** Check the folder under Installing, and that Resolume was
 restarted.
 
+**Resolume's tempo does not follow.** Read the row under the header (Hide Screen off) or the
+log. `NOT TAKEN`: Resolume's OSC input is off (Preferences → OSC → OSC Input) or on another port
+than OSC Port. `WAITING`: nothing has been confirmed yet; give a steady beat six seconds, and
+check that audio is reaching the layer. `ANOTHER SENDS`: another SW Pattern clip has Send Tempo
+on. The log's lines start `tempo out:`.
+
+**Resolume's tempo went to half or double.** The detector read the music at another metrical
+level (see Detected tempo). Set the tempo by hand, or turn Send Tempo off for that music.
+
 **It does nothing at all.** A shader that will not compile looks exactly like that, and the
 real message is in the log:
 
@@ -355,7 +483,9 @@ Windows  %LOCALAPPDATA%\pattern\logs\pattern.YYYY-MM-DD.log
 ```
 
 It records the build, the GL driver, what unit the host's clock turned out to be, whether any
-audio reached the layer, and which tempo the clock is following.
+audio reached the layer, which tempo the clock is following (and whether the detected one is
+live, lost or not settled), and, once Send Tempo has been on, every change in what Tempo Out is
+doing: what it sent, whether Resolume took it, and if not, the likely reason.
 
 ---
 
@@ -383,6 +513,7 @@ audio reached the layer, and which tempo the clock is following.
   for this release.
 - **Checked at 640 × 360 and 320 × 180** in the harness, and only timed at 720p, 1080p and
   4K. Only ever run on an Apple M4 Max, although the macOS build contains an Intel slice.
+- **Tempo Out has never been run against a Resolume** (see Tempo Out, "Before you rely on it").
 - **No presets** and no OpenFX version.
 - **There is a browser demo** at [pattern-demo.stoatworks-labs.com](https://pattern-demo.stoatworks-labs.com).
   It is a port to a web page, not the plugin: the shader runs in WebGL2 and the tracker, the

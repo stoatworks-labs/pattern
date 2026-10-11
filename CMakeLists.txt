@@ -86,6 +86,8 @@ add_library(pattern_core OBJECT
     source/Shaders.cpp
     source/Render.h
     source/Render.cpp
+    source/OscSend.h
+    source/OscSend.cpp
     source/Pattern.h
     source/Pattern.cpp
 )
@@ -97,6 +99,12 @@ set_target_properties(pattern_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 find_package(Threads REQUIRED)
 target_link_libraries(pattern_core PUBLIC Threads::Threads)
+
+# Tempo Out's one UDP socket (source/OscSend.cpp). Winsock on Windows; BSD
+# sockets are in libc everywhere else.
+if(WIN32)
+    target_link_libraries(pattern_core PUBLIC ws2_32)
+endif()
 
 # On Windows/Linux the SDK headers pull in <GL/glew.h>. The SDK links GLEW
 # privately, so consumers need it too -- for the include path and for the
@@ -155,8 +163,9 @@ install(TARGETS PatternSource
 # macOS only, because the grid check stands up a CGL context directly. The
 # tracker checks do not: every claim about the clock, the ring, the onsets,
 # the pitches and the detected tempo is a claim about source/tracker/, so
-# --timing, --onset, --prime, --pitch, --ring, --detected, --names and --font
-# open no context at all and run on a machine with no GPU.
+# --timing, --onset, --prime, --pitch, --ring, --detected, --groove, --names
+# and --font open no context at all and run on a machine with no GPU -- and
+# so do --send and --osc, Tempo Out's policy and bytes.
 # ---------------------------------------------------------------------------
 if(PATTERN_BUILD_TOOLS AND APPLE)
     enable_testing()
@@ -171,6 +180,9 @@ if(PATTERN_BUILD_TOOLS AND APPLE)
     add_test(NAME pitch    COMMAND pntest --pitch)
     add_test(NAME ring     COMMAND pntest --ring)
     add_test(NAME detected COMMAND pntest --detected)
+    add_test(NAME groove   COMMAND pntest --groove)
+    add_test(NAME send     COMMAND pntest --send)
+    add_test(NAME osc      COMMAND pntest --osc)
     add_test(NAME names    COMMAND pntest --names)
     add_test(NAME font     COMMAND pntest --font)
     add_test(NAME grid     COMMAND pntest --grid)
