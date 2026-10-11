@@ -115,12 +115,12 @@ schemes named by colour.
   C-1..B-3 is moved by octaves into it rather than shown as `---`).
 - **Display** — Theme (Grey / Blue / Green), Rows Visible (3–33), Show VU, Show
   Effects, Scale (whole pixels per screen pixel; 0 is the largest that fits).
-- **Tempo Out** *(after v0.1.1, unreleased; the last group, after About)* — Send
+- **Tempo Out** *(since v0.2.0; the last group, after About)* — Send
   Tempo (push the detected tempo into Resolume's composition tempo over OSC),
   OSC Port (Resolume's OSC input, 7000), Default BPM (60–200), When Lost (Hold /
   Default), Hide Screen (a transparent output, so it can sit in a show).
 
-## Setting Resolume's tempo (Tempo Out, unreleased)
+## Setting Resolume's tempo (Tempo Out)
 
 FFGL lets a plugin read the host's tempo but never set it, so with **Send Tempo**
 on Pattern sends the tempo it hears to Resolume's own OSC input on 127.0.0.1:
@@ -162,9 +162,10 @@ used yet (see `AGENTS.md`).
 
 ## Status
 
-**v0.1.1, released 2026-09-25, and honestly early.** v0.1.1 fixes the Detected
-tempo source, which in v0.1.0 locked to half the real tempo on programme
-material (62 for a 125 BPM groove); nothing else changed.
+**v0.2.0, released 2026-10-11, and honestly early.** v0.2.0 adds **Tempo Out**,
+which sends the detected tempo to Resolume over OSC, and **Hide Screen**. v0.1.1
+(2026-09-25) fixed the Detected tempo source, which in v0.1.0 locked to half the
+real tempo on programme material (62 for a 125 BPM groove).
 
 Verified, by measurement on this machine (Apple Silicon, macOS 26.4), with
 `tools/verify.sh` green:
@@ -213,7 +214,7 @@ Verified, by measurement on this machine (Apple Silicon, macOS 26.4), with
 - **No dead controls.** All 20 that draw change the picture at 640×360 and at
   320×180; Send Tempo and OSC Port are not swept (on, the render would send to
   port 7000) and are measured by `--send` and `--osc` instead.
-- **Tempo Out** *(unreleased)*, against a fake Resolume (`--send`): a metronome
+- **Tempo Out** *(v0.2.0)*, against a fake Resolume (`--send`): a metronome
   at 120 is sent once in 60 s, at 6.00 s; 120 then 140 is two sends; a
   Resolume that never takes it gets 1 + 3 sends two seconds apart and then
   `NOT TAKEN`; a hand on Resolume's tempo is not fought; Hold sends nothing when

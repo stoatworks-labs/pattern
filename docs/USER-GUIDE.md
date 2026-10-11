@@ -14,7 +14,7 @@ after row `3F` the cursor wraps and the next pass overwrites the last.
 than captured from Resolume. Each channel column reads note, sample number and effect; the
 blue row is the cursor.*
 
-> **Before you rely on this:** released at **v0.1.1**, and honestly early. The tracker is
+> **Before you rely on this:** released at **v0.2.0**, and honestly early. The tracker is
 > measured rather than asserted, by a harness that drives the real plugin class, and nine of
 > its ten check groups open no GL context at all: the row cursor sits on floor(t / T) mod 64
 > on every one of 36,000 frames of a ten-minute run at 60 fps (and 30,000 at 50, 18,000 at 30)
@@ -39,7 +39,7 @@ blue row is the cursor.*
 > Manual BPM could not be shown moving on the gate's still picture (it changes three digits in
 > the header). Try it on a spare layer before you put it in a show.
 >
-> **Tempo Out is newer than v0.1.1 and not in a release yet.** What it sends was measured
+> **Tempo Out is new in v0.2.0 and unverified in a host.** What it sends was measured
 > against Resolume Arena 7.27.1 by sending the same message from outside the plugin; the plugin
 > itself has never sent anything to a Resolume, and nothing has checked that Resolume reports its
 > new tempo back to the plugin. See [Tempo Out](#tempo-out-setting-resolumes-tempo).
@@ -319,7 +319,7 @@ anything the show depends on, use Host or Manual.
 
 ## Tempo Out: setting Resolume's tempo
 
-*Added after v0.1.1; not in a release yet.*
+*Added in v0.2.0.*
 
 With **Send Tempo** on, Pattern pushes the tempo it hears into Resolume's own composition tempo,
 so the BPM-synced parts of a show follow the music without anyone typing a BPM. It can sit on a

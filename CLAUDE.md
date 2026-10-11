@@ -3,9 +3,9 @@
 A tracker's pattern editor written by the music as it plays, as an FFGL
 **source** for Resolume Arena/Avenue. C++17/GLSL 4.10, CMake MODULE →
 universal `.bundle` (macOS) + Windows `.dll`. MIT. Released as v0.1.0 on
-2026-09-24 and v0.1.1 on 2026-09-25 (the Detected tempo's octave fix); never
-loaded into Resolume on macOS. Unreleased since: **Tempo Out** (the detected
-tempo sent to Resolume's composition tempo over OSC) and Hide Screen.
+2026-09-24, v0.1.1 on 2026-09-25 (the Detected tempo's octave fix) and v0.2.0 on
+2026-10-11 (**Tempo Out**: the detected tempo sent to Resolume's composition tempo
+over OSC, and Hide Screen); never loaded into Resolume on macOS.
 
 Read `AGENTS.md` before touching the row clock, the onset detector, the band
 split, or any tolerance in the harness.
