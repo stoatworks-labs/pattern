@@ -44,15 +44,15 @@ through its real audio input, so what is heard is what wrote the pattern.*
 
 ## Download
 
-**[v0.2.0](https://github.com/stoatworks-labs/pattern/releases/tag/v0.2.0)** — prebuilt for macOS and Windows. Pick your platform:
+**[v0.2.1](https://github.com/stoatworks-labs/pattern/releases/tag/v0.2.1)** — prebuilt for macOS and Windows. Pick your platform:
 
 <details>
 <summary><b>macOS</b> — Universal (Apple Silicon + Intel)</summary>
 
 | Build | Download | Size |
 | --- | --- | --- |
-| Universal (Apple Silicon + Intel) · .dmg disk image | [`pattern-0.2.0-macos-universal.dmg`](https://github.com/stoatworks-labs/pattern/releases/download/v0.2.0/pattern-0.2.0-macos-universal.dmg) | 264 KB |
-| Universal (Apple Silicon + Intel) · .zip archive | [`pattern-macos-universal.zip`](https://github.com/stoatworks-labs/pattern/releases/latest/download/pattern-macos-universal.zip) | 218 KB |
+| Universal (Apple Silicon + Intel) · .dmg disk image | [`pattern-0.2.1-macos-universal.dmg`](https://github.com/stoatworks-labs/pattern/releases/download/v0.2.1/pattern-0.2.1-macos-universal.dmg) | 270 KB |
+| Universal (Apple Silicon + Intel) · .zip archive | [`pattern-macos-universal.zip`](https://github.com/stoatworks-labs/pattern/releases/latest/download/pattern-macos-universal.zip) | 224 KB |
 
 </details>
 
@@ -61,8 +61,8 @@ through its real audio input, so what is heard is what wrote the pattern.*
 
 | Build | Download | Size |
 | --- | --- | --- |
-| x64 · .exe installer | [`pattern-0.2.0-windows-x86_64-setup.exe`](https://github.com/stoatworks-labs/pattern/releases/download/v0.2.0/pattern-0.2.0-windows-x86_64-setup.exe) | 238 KB |
-| x64 · .zip archive | [`pattern-windows-x86_64.zip`](https://github.com/stoatworks-labs/pattern/releases/latest/download/pattern-windows-x86_64.zip) | 129 KB |
+| x64 · .exe installer | [`pattern-0.2.1-windows-x86_64-setup.exe`](https://github.com/stoatworks-labs/pattern/releases/download/v0.2.1/pattern-0.2.1-windows-x86_64-setup.exe) | 241 KB |
+| x64 · .zip archive | [`pattern-windows-x86_64.zip`](https://github.com/stoatworks-labs/pattern/releases/latest/download/pattern-windows-x86_64.zip) | 132 KB |
 
 </details>
 
