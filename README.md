@@ -166,8 +166,10 @@ used yet (see `AGENTS.md`).
 
 ## Status
 
-**v0.2.0, released 2026-10-11, and honestly early.** v0.2.0 adds **Tempo Out**,
-which sends the detected tempo to Resolume over OSC, and **Hide Screen**. v0.1.1
+**v0.2.1, released 2026-10-12, and honestly early.** v0.2.1 makes Tempo Out follow a
+change of music in about 4 s, as one message, and say HOLD when it is unsure; v0.2.0
+(2026-10-11) added **Tempo Out**, which sends the detected tempo to Resolume over OSC,
+and **Hide Screen**. v0.1.1
 (2026-09-25) fixed the Detected tempo source, which in v0.1.0 locked to half the
 real tempo on programme material (62 for a 125 BPM groove).
 
@@ -231,7 +233,7 @@ Verified, by measurement on this machine (Apple Silicon, macOS 26.4), with
   own socket delivers exactly the 48 bytes of `,sf "a" 120.0` to a listener on
   127.0.0.1 (never 7000), follows an OSC Port change at once, and sends nothing
   when off; the plain-float form fails the byte check.
-- **Following a change** *(v0.2.1, not yet released)*, `--follow`: the release
+- **Following a change** *(v0.2.1)*, `--follow`: the release
   video's groove at 124 cut to five other grooves at 30 and 60 fps is sent
   4.0 s after the cut (v0.2.0: 6, up to 8), as one message, and no change in 30
   (cuts, 3 s gaps, 8 s crossfades) sends anything but the new tempo (v0.2.0: 5

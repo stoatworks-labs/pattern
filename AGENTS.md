@@ -11,8 +11,8 @@ the tempo on programme material (see "The detected tempo, v0.1.1").
 **Never loaded into Resolume on macOS**. v0.2.0 (2026-10-11) added **Tempo Out**
 (issue #5) — the detected tempo pushed into Resolume's composition tempo over
 OSC, a confirmed / live / lost state for the detector, Default BPM / When Lost,
-and Hide Screen (see "Tempo Out"). v0.2.1 (issue #5 again, built 2026-10-12, not yet
-released) makes Tempo Out follow a change of music in seconds, as one message, and
+and Hide Screen (see "Tempo Out"). v0.2.1 (issue #5 again, released
+2026-10-12) makes Tempo Out follow a change of music in seconds, as one message, and
 stops it from sending nothing (see "Tempo Out, v0.2.1").
 
 `CLAUDE.md` is the command reference. This file is the *why*: the idea, every

@@ -14,7 +14,7 @@ after row `3F` the cursor wraps and the next pass overwrites the last.
 than captured from Resolume. Each channel column reads note, sample number and effect; the
 blue row is the cursor.*
 
-> **Before you rely on this:** released at **v0.2.0**, and honestly early. The tracker is
+> **Before you rely on this:** released at **v0.2.1**, and honestly early. The tracker is
 > measured rather than asserted, by a harness that drives the real plugin class, and nine of
 > its ten check groups open no GL context at all: the row cursor sits on floor(t / T) mod 64
 > on every one of 36,000 frames of a ten-minute run at 60 fps (and 30,000 at 50, 18,000 at 30)
@@ -32,8 +32,8 @@ blue row is the cursor.*
 > Tempo and OSC Port, which only send, are checked against a socket the harness owns). It has **never
 > been loaded into Resolume on macOS**, and **no real audio has reached it in a host**: the
 > one host it has run in there is the fleet's own test host, `oxbow`. On Windows, a build of
-> v0.1.0 (the same code but for the tempo detector) loads, registers as a source and renders
-> in Resolume Arena 7.27.1, with all 23 host controls matching what the plugin declares — on
+> the v0.2.1 code loads, registers as a source and renders in Resolume Arena 7.27.1, with all
+> 28 host controls matching what the plugin declares (2026-10-12; v0.1.0 passed the same with 23) — on
 > software rendering (win-lab, Mesa llvmpipe, no GPU), so that says nothing about a GPU. That
 > box has no sound device, so its 12 audio-driven controls were not exercised there, and the
 > Manual BPM could not be shown moving on the gate's still picture (it changes three digits in
