@@ -131,9 +131,13 @@ sets 500, measured in Arena 7.27.1. **Resolume's OSC Input is off by default**
 readings in a row that agree, about six seconds into a steady beat), rounded to
 0.1 BPM, on a change of 0.5 BPM or more, at most once a second, resent at most
 three times if Resolume's tempo (read back through `SetBeatInfo`) does not
-follow. One instance per Resolume sends. **When Lost** decides what happens two
-seconds into silence or eight without a confirmation: Hold (send nothing) or
-Default (send Default BPM). It sends the detector's mistakes too — a breakbeat
+follow. Once a tempo is live, a clear change is confirmed from the last three
+seconds and sent 3 to 5 s after it as one message (crossfades take longer; half
+or double the tempo takes the careful six-second path). One instance per
+Resolume sends, and only one that has a tempo to send; a tempo set by hand in
+Resolume is left alone until the music moves. **When Lost** decides what
+happens two seconds into silence or eight without a confirmation: Hold (send
+nothing; the status row says `HOLD`) or Default (send Default BPM). It sends the detector's mistakes too — a breakbeat
 or an off-beat bass at 80–90 can set Resolume to half or double — and a music
 clip on BPM Sync transport would hear every change it makes, so keep music on
 Timeline. The user guide has the set-up, the status row and the caveats. **The
@@ -227,6 +231,14 @@ Verified, by measurement on this machine (Apple Silicon, macOS 26.4), with
   own socket delivers exactly the 48 bytes of `,sf "a" 120.0` to a listener on
   127.0.0.1 (never 7000), follows an OSC Port change at once, and sends nothing
   when off; the plain-float form fails the byte check.
+- **Following a change** *(v0.2.1, not yet released)*, `--follow`: the release
+  video's groove at 124 cut to five other grooves at 30 and 60 fps is sent
+  4.0 s after the cut (v0.2.0: 6, up to 8), as one message, and no change in 30
+  (cuts, 3 s gaps, 8 s crossfades) sends anything but the new tempo (v0.2.0: 5
+  in-between values). A steady backbeat at 128, 30 fps, is sent once in 60 s
+  (v0.2.0: 14 times). A second instance that hears a beat sends it while the
+  first hears nothing (v0.2.0: never). On rendered grooves through the
+  harness's FFT and a fake Resolume; not run in Resolume with audio.
 - **Hide Screen** leaves every one of 230,400 pixels transparent black while
   the pattern carries on underneath (`--grid`).
 - **The pipe.** Three 64×36 frames are 27,648 bytes; a reader that hangs up

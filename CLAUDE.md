@@ -49,9 +49,17 @@ split, or any tolerance in the harness.
     file's detected tempo once a second (verify.sh runs the release video's soundtrack when the
     backend checkout is present)
   - `./build/pntest --send` — Tempo Out against a fake Resolume: one send per confirmed tempo, ≤1/s,
-    0.5 BPM hysteresis, 1 + 3 sends then NOT TAKEN, no fight with an operator, When Lost Hold/Default,
-    one sender per process, the lost state, 72 noise runs send nothing; negative controls: no
-    hysteresis, and `unconfirmedTempo` (noise gets through)
+    0.5 BPM hysteresis, 1 + 3 sends then NOT TAKEN, no fight with an operator (also across a break),
+    When Lost Hold/Default, one sender per process and the job to whoever has a tempo, the lost
+    state, the status row's HOLD, no revival after a silence, a steady 30 fps backbeat sent once, 72
+    noise runs send nothing; negative controls: no hysteresis, `unconfirmedTempo` (noise gets
+    through), and each v0.2.0 rule v0.2.1 replaced (`averageThree`, `keepOwnership`,
+    `debugSenderOnlyStatus`, `staleRevival`, `lastSentOnly`) plus `ignoreHand`
+  - `./build/pntest --follow` — Tempo Out following a change of music: house 124 then five grooves by
+    a cut, a 3 s gap or an 8 s crossfade, at 30 and 60 fps. A cut sent within 5 s (median; measured
+    4.0), as ONE message, nothing in between over all 30 changes, and 72 lock-then-noise runs send
+    nothing false; v0.2.0's confirmation (`noFastRelock` + `averageThree`) must fail the first
+    three, and the fast re-lock on the six-second window's thresholds (`laxFastRelock`) the last
   - `./build/pntest --osc` — the plugin's own UDP socket to a listener on 127.0.0.1 (kernel-chosen
     port, never 7000): exactly the 48 bytes of `,sf "a" 120.0`; the plain `,f` form must fail
   - `./build/pntest --names` — no name over 16 characters, none duplicated (as written or as
@@ -106,9 +114,16 @@ Every check carries its negative control and asserts that it fails.
   Measured in Arena 7.27.1: a plain `,f` there is NORMALISED over 20–500 (`,f 140` → 500), `,i 120`
   is exact, the `"a"` form is exact with fractions. OSC Input is OFF by default in Resolume.
   It sends the CONFIRMED tempo (three publications in consecutive cycles, R ≥ 0.3, sound in the
-  last second, within 2 %) — noise publishes, and a window straddling a change publishes
-  in-between values; neither confirms. Socket opened lazily from `ProcessOpenGL` only, non-blocking,
-  no thread, no TLS. One sender per process (static owner, 2 s takeover). AGENTS.md has the numbers.
+  last second, within 2 %; the value is the mean of the run, up to eight) — noise publishes and
+  never confirms. A six-second window straddling a change DOES publish in-between values that
+  confirm one after another (v0.2.0 sent a cut 124 → 128 as 125.0, 127.1, 127.7), so since v0.2.1 a
+  live tempo also reads the last 3 s every second (`Tracker::Estimate( kTempoShortWindow )`): two
+  short readings in a row within 1 %, R ≥ 0.5, > 2 % from the live tempo and not ×½ ×⅔ ×1½ ×2
+  confirm at once, and for 6 s the six-second window cannot pull it back. A confirmation from
+  before a silence that lost the tempo never comes back. Socket opened lazily from `ProcessOpenGL`
+  only, non-blocking, no thread, no TLS. One sender per process (static owner, 2 s takeover); an
+  instance with nothing to send lets go, and a live tempo outranks a Default BPM sender. AGENTS.md
+  has the numbers.
 - **The ids after About are Tempo Out's** (23..27): appended so no released id moved. `IsAbout()`
   is the About test now, not `>= PT_ABOUT_TEXT`; a static_assert pins the ids.
 - **Never sweep Send Tempo or OSC Port** (sweep.py SKIPs them): on, a render sends to port 7000.
@@ -127,9 +142,11 @@ Every check carries its negative control and asserts that it fails.
   BPM still read at the wrong level (printed by `--groove`, not asserted).
 - No presets, no OpenFX port. User guide in `docs/`, browser demo in `demo/`.
 - **Tempo Out has never sent a tempo to a Resolume.** Unmeasured: the plugin's own send arriving,
-  Resolume reporting the new tempo back via `SetBeatInfo` (the NOT TAKEN logic depends on it), a
-  clip at opacity 0 / bypassed still running, Hide Screen under Resolume's blend modes,
-  GetParameterDisplay's "125.0 BPM" in the inspector, Ableton Link propagation.
+  Resolume reporting the new tempo back via `SetBeatInfo` (the NOT TAKEN, OVERRIDDEN and "already
+  there" logic depends on it), a clip at opacity 0 / bypassed still running, Hide Screen under
+  Resolume's blend modes, GetParameterDisplay's "125.0 BPM" in the inspector, Ableton Link
+  propagation. v0.2.1's change latency (3–5 s), one message per change and the ownership hand-over
+  are harness numbers on rendered grooves; none of it has run in Resolume with audio.
 
 ## Browser demo
 - Live at https://pattern-demo.stoatworks-labs.com (Cloudflare Worker `pattern-demo`,
@@ -146,8 +163,9 @@ Every check carries its negative control and asserts that it fails.
   the palettes, Controls.h, ToOption, Render's uploads and uniforms, Font). Change
   the C++ and the page silently disagrees; only a reader checks it.
 - The page has no Tempo Out group (no UDP in a browser). Its tracker port does carry the
-  confirmed / live / lost rules, because the header's `*` / `?` depends on them; a scratch
-  driver checked them against the C++ to six decimals (not in verify.sh).
+  confirmed / live / lost rules, the fast re-lock and the run of eight included, because the
+  header's `*` / `?` depends on them; a scratch driver checked them against the C++ to six
+  decimals (v0.2.1: 360 detection cycles over seven programmes, identical; not in verify.sh).
 - No audio: the page synthesises a 64-bin spectrum from a drum-loop-like programme
   on its own clock and hands the port the programme's tempo as the host's. Not
   Resolume's FFT. Speed, Rows Visible and Scale are dropdowns (no integer type in

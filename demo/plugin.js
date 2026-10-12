@@ -298,6 +298,15 @@ const kTempoQuietSeconds = 1.0;
 const kTempoLostSeconds = 8.0;
 const kTempoSilenceSeconds = 2.0;
 const kSoundLevel = 1e-6;
+// v0.2.1: the run's mean of up to eight, and the fast re-lock on three seconds.
+const kTempoAverageMax = 8;
+const kTempoShortWindow = 300;
+const kTempoFastR = 0.5;
+const kTempoFastAgree = 0.01;
+const kTempoFastJump = 0.02;
+const kTempoRelatedSlack = 0.03;
+const kTempoFastHoldSeconds = 6.0;
+const kTempoCurrentSeconds = 3.0;
 const kEnvSize = 1024;
 
 /** Each bin's tempo register from its centre under the bin law: 0 low, 1 mid, 2 high. */
@@ -372,10 +381,16 @@ class Tracker {
     this.lastPublishAt = 0.0;
     this.lastSoundAt = 0.0;
     this.published = false;
-    this.run = [0.0, 0.0, 0.0];
+    this.run = new Float64Array(kTempoAverageMax);
     this.runCount = 0;
     this.confirmedBpm = 0.0;
     this.lastConfirmAt = 0.0;
+    this.lastConfirmFast = false;
+    this.lastAgreeAt = 0.0;
+    this.shortPrev = 0.0;
+    this.fastBpm = 0.0;
+    this.fastUntil = -1e300;
+    this.soundBackAt = -1e300;
     this.peakR = 0.0;
     bandEdges(this.settings.channels, this.settings.binLaw, this.settings.gamma, this.edges);
   }
@@ -391,28 +406,63 @@ class Tracker {
   }
 
   tempoSettled() { return this.detectedBpm > 0.0; }
-  /** Confirmations coming and sound playing: the header's `*`. */
+  /** Confirmations coming and sound playing: the header's `*`. A confirmation from before a silence stays dead. */
   tempoLive() {
-    return this.confirmedBpm > 0.0 && this.now - this.lastConfirmAt <= kTempoLostSeconds &&
-      this.now - this.lastSoundAt <= kTempoSilenceSeconds;
+    return this.confirmedBpm > 0.0 && !(this.lastConfirmAt < this.soundBackAt) &&
+      this.now - this.lastConfirmAt <= kTempoLostSeconds && this.now - this.lastSoundAt <= kTempoSilenceSeconds;
   }
   tempoLost() { return this.confirmedBpm > 0.0 && !this.tempoLive(); }
+  /** Live, and what the detector hears now still agrees with it (Tempo Out's status row; unused on the page). */
+  tempoCurrent() { return this.tempoLive() && this.now - Math.max(this.lastAgreeAt, this.lastConfirmAt) <= kTempoCurrentSeconds; }
 
   confirm() {
-    if (!this.published || !(this.peakR >= kTempoTrustR) || this.now - this.lastSoundAt > kTempoQuietSeconds) {
+    const agrees = (a, b) => b > 0.0 && Math.abs(a / b - 1.0) <= kTempoAgree;
+    if (this.fastBpm > 0.0) {
+      // The three-second window has agreed with itself on a clear change.
+      this.confirmedBpm = this.fastBpm;
+      this.lastConfirmAt = this.now;
+      this.lastConfirmFast = true;
+      this.fastUntil = this.now + kTempoFastHoldSeconds;
       this.runCount = 0;
       return;
     }
-    this.run.shift();
-    this.run.push(this.detectedBpm);
-    this.runCount = Math.min(this.runCount + 1, kTempoConfirmRun);
-    if (this.runCount < kTempoConfirmRun) return;
-    let lo = this.run[0], hi = this.run[0], sum = 0.0;
-    for (const b of this.run) { lo = Math.min(lo, b); hi = Math.max(hi, b); sum += b; }
-    if (hi / lo - 1.0 <= kTempoAgree) {
-      this.confirmedBpm = sum / kTempoConfirmRun;
-      this.lastConfirmAt = this.now;
+    const qualifies = this.published && this.peakR >= kTempoTrustR && this.now - this.lastSoundAt <= kTempoQuietSeconds;
+    if (!qualifies) {
+      this.runCount = 0;
+      return;
     }
+    const hold = this.now < this.fastUntil;
+    if (agrees(this.detectedBpm, this.confirmedBpm)) {
+      this.lastAgreeAt = this.now;
+      if (hold) {
+        // After a fast re-lock the six-second window cannot move the tempo:
+        // agreeing keeps it live and clears the run of anything in between.
+        this.lastConfirmAt = this.now;
+        this.runCount = 0;
+        return;
+      }
+    }
+    // The run: the latest consecutive publications that agree within 2 %, up to eight.
+    if (this.runCount === kTempoAverageMax) {
+      this.run.copyWithin(0, 1, this.runCount);
+      this.runCount -= 1;
+    }
+    this.run[this.runCount] = this.detectedBpm;
+    this.runCount += 1;
+    for (;;) {
+      let lo = this.run[0], hi = this.run[0];
+      for (let i = 1; i < this.runCount; i += 1) { lo = Math.min(lo, this.run[i]); hi = Math.max(hi, this.run[i]); }
+      if (hi / lo - 1.0 <= kTempoAgree) break;
+      this.run.copyWithin(0, 1, this.runCount);
+      this.runCount -= 1;
+    }
+    // A run that disagrees cannot confirm until the hold is over.
+    if (this.runCount < kTempoConfirmRun || hold) return;
+    let sum = 0.0;
+    for (let i = 0; i < this.runCount; i += 1) sum += this.run[i];
+    this.confirmedBpm = sum / this.runCount;
+    this.lastConfirmAt = this.now;
+    this.lastConfirmFast = false;
   }
   bandEdge(k) { return this.edges[k]; }
   at(row, channel) { return this.cells[row][channel]; }
@@ -448,7 +498,11 @@ class Tracker {
     this.lastPublishAt = seconds;
     this.lastSoundAt = seconds;
     this.lastConfirmAt = seconds;
+    this.lastAgreeAt = seconds;
     this.runCount = 0;
+    this.shortPrev = 0.0;
+    this.fastUntil = -1e300;
+    this.soundBackAt = -1e300;
 
     this.prev.set(m);
     for (let k = 0; k < this.settings.channels; k += 1) {
@@ -588,7 +642,51 @@ class Tracker {
   }
 
   detectTempo() {
-    const n = Math.min(this.envIndex + 1, kTempoWindow);
+    const t = this.estimate(Math.min(this.envIndex + 1, kTempoWindow));
+    // The fast re-lock is judged against the tempo as it stood before this cycle.
+    this.fastRelock(t);
+    if (t.status === 0) return;
+    if (t.status === 1) {
+      this.candidateBpm = 0.0;
+      return;
+    }
+    // Published only when the reading before agrees within 2 %.
+    const agrees = (a, b) => b > 0.0 && Math.abs(a / b - 1.0) <= kTempoAgree;
+    const publish = agrees(t.bpm, this.candidateBpm) || agrees(t.bpm, this.detectedBpm);
+    this.candidateBpm = t.bpm;
+    this.peakR = t.peak;
+    if (publish) {
+      this.detectedBpm = t.bpm;
+      this.lastPublishAt = this.now;
+      this.published = true;
+    }
+  }
+
+  /** v0.2.1: while a tempo is live, two three-second readings in a row confirm a clear change at once. */
+  fastRelock(wide) {
+    this.fastBpm = 0.0;
+    if (!(this.confirmedBpm > 0.0) || !this.tempoLive()) {
+      this.shortPrev = 0.0;
+      return;
+    }
+    const s = this.estimate(kTempoShortWindow);
+    const good = s.status === 2 && s.peak >= kTempoFastR && this.now - this.lastSoundAt <= kTempoQuietSeconds;
+    if (good && this.shortPrev > 0.0 && Math.abs(s.bpm / this.shortPrev - 1.0) <= kTempoFastAgree) {
+      const ratio = 0.5 * (s.bpm + this.shortPrev) / this.confirmedBpm;
+      let related = false;
+      for (const k of [0.5, 2.0 / 3.0, 1.5, 2.0]) related = related || Math.abs(ratio / k - 1.0) <= kTempoRelatedSlack;
+      if (Math.abs(ratio - 1.0) > kTempoFastJump && !related) {
+        // All three readings when the six-second window already agrees; else the newest alone.
+        const wideAgrees = wide.status === 2 && Math.abs(wide.bpm / s.bpm - 1.0) <= kTempoFastAgree;
+        this.fastBpm = wideAgrees ? (s.bpm + this.shortPrev + wide.bpm) / 3.0 : s.bpm;
+      }
+    }
+    this.shortPrev = good ? s.bpm : 0.0;
+  }
+
+  /** One reading of the last `n` envelope samples: status 0 silent, 1 weak (R under kTempoSettleR), 2 a reading. */
+  estimate(n) {
+    const out = { status: 0, bpm: 0.0, peak: 0.0 };
     const kWeight = [1.0, 1.0, 0.5];
     const kSmooth = 6;
     const kSigma = 2.0;
@@ -633,7 +731,7 @@ class Tracker {
     let power = 0.0;
     for (let i = 0; i < n; i += 1) power += x[i] * x[i];
     power /= n;
-    if (!(power > 1e-18)) return;
+    if (!(power > 1e-18)) return out;
     const maxLag = Math.min(kTempoMaxLag, n - 60);
     const r = new Float64Array(kTempoMaxLag + 2);
     for (let lag = 0; lag <= maxLag; lag += 1) r[lag] = autoCorr(x, n, lag, power);
@@ -670,9 +768,10 @@ class Tracker {
     }
 
     const peak = peakNear(r, maxLag, best);
+    out.peak = peak;
     if (peak < kTempoSettleR) {
-      this.candidateBpm = 0.0;
-      return;
+      out.status = 1;
+      return out;
     }
 
     // Refine on the peak of R at the largest multiple that fits (up to 4).
@@ -690,17 +789,9 @@ class Tracker {
       if (d < 0.0) lag += 0.5 * (a - cc) / d;
     }
     lag /= m;
-    // Published only when the reading before agrees within 2 %.
-    const reading = 60.0 * kTempoRate / lag;
-    const agrees = (a, b) => b > 0.0 && Math.abs(a / b - 1.0) <= kTempoAgree;
-    const publish = agrees(reading, this.candidateBpm) || agrees(reading, this.detectedBpm);
-    this.candidateBpm = reading;
-    this.peakR = peak;
-    if (publish) {
-      this.detectedBpm = reading;
-      this.lastPublishAt = this.now;
-      this.published = true;
-    }
+    out.status = 2;
+    out.bpm = 60.0 * kTempoRate / lag;
+    return out;
   }
 
   /** One host frame. `bins` is a Float32Array — the host's floats. */
@@ -724,10 +815,14 @@ class Tracker {
         this.vuTime[k] -= this.lastSeconds - seconds;
         this.lastFire[k] -= this.lastSeconds - seconds;
       }
-      this.envOrigin -= this.lastSeconds - seconds;
-      this.lastPublishAt -= this.lastSeconds - seconds;
-      this.lastSoundAt -= this.lastSeconds - seconds;
-      this.lastConfirmAt -= this.lastSeconds - seconds;
+      const back = this.lastSeconds - seconds;
+      this.envOrigin -= back;
+      this.lastPublishAt -= back;
+      this.lastSoundAt -= back;
+      this.lastConfirmAt -= back;
+      this.lastAgreeAt -= back;
+      this.fastUntil -= back;
+      this.soundBackAt -= back;
       this.lastSeconds = seconds;
     }
 
@@ -737,6 +832,8 @@ class Tracker {
 
     for (let j = 0; j < kBins; j += 1) {
       if (m[j] > kSoundLevel) {
+        // The end of a silence long enough to have lost the tempo.
+        if (seconds - this.lastSoundAt > kTempoSilenceSeconds) this.soundBackAt = seconds;
         this.lastSoundAt = seconds;
         break;
       }
@@ -1411,7 +1508,7 @@ const edgesText = (v) => {
 const PARAMS = [
   // -- Clock --------------------------------------------------------------
   opt('tempoSource', 'Tempo Source', ['Host', 'Detected', 'Manual'], 0, 'Clock',
-    'Where the row clock’s BPM comes from. Host: what SetBeatInfo says — on this page the programme’s own tempo, in Resolume the composition’s. Detected: the ported tempo detector — the onset envelope in three registers (low, mid, high), each standardised, autocorrelated once a second over the last six, the beat chosen as the fastest level scoring within 0.70 of the best, and published once two readings in a row agree; the header shows * only while the tempo is confirmed (three publications in a row, a second apart, that agree) and sound is playing, and ? otherwise. Manual: the BPM control.'),
+    'Where the row clock’s BPM comes from. Host: what SetBeatInfo says — on this page the programme’s own tempo, in Resolume the composition’s. Detected: the ported tempo detector — the onset envelope in three registers (low, mid, high), each standardised, autocorrelated once a second over the last six, the beat chosen as the fastest level scoring within 0.70 of the best, and published once two readings in a row agree; the header shows * only while the tempo is confirmed (three publications in a row, a second apart, that agree; once confirmed, a clear change is confirmed from the last three seconds alone when two such readings agree) and sound is playing, and ? otherwise. Manual: the BPM control.'),
   std('bpm', 'BPM', kBpmDefault, 'Clock', {
     display: (v) => `${BpmFromControl(v).toFixed(1)} BPM`,
     hint: 'Manual tempo, 60 to 200. The default of 0.4642857 is 125 BPM, the figure the Amiga-era trackers ran at (a tick of 20 ms). Read only when Tempo Source is Manual.',

@@ -27,8 +27,14 @@
 	                the detected tempo of a real file, once a second
 	    --send      Tempo Out's policy against a fake Resolume: one send per
 	                tempo, resends capped when Resolume does not take it, no
-	                fight with an operator, When Lost, one sender per process,
-	                the lost state; no hysteresis must fail
+	                fight with an operator, When Lost, one sender per process
+	                and the job going to whoever has a tempo, the lost state,
+	                the status row's HOLD, no revival after a silence; no
+	                hysteresis, and each v0.2.0 rule v0.2.1 replaced, must fail
+	    --follow    Tempo Out following a change of music (a cut, a gap, a
+	                crossfade between rendered grooves): a cut sent within 5 s
+	                as one message, nothing in between; v0.2.0's confirmation
+	                must fail
 	    --osc       Tempo Out's datagram through a real socket on 127.0.0.1
 	                (never port 7000), byte for byte; the plain-float form
 	                Resolume clamps to 500 must fail
@@ -1476,7 +1482,10 @@ struct Groove
 	}
 
 	/// `seconds` of the groove at `bpm`, as a mono WAV the harness's FFT reads.
-	static Wav render( int kind, double bpm, double seconds )
+	/// The first bar starts at `from` and no note starts at or after `until`
+	/// (a tail already sounding carries on), so a change of music can be
+	/// mixed from two of these; the defaults are the whole length.
+	static Wav render( int kind, double bpm, double seconds, double from = 0.0, double until = 1e300 )
 	{
 		struct Part
 		{
@@ -1530,8 +1539,11 @@ struct Groove
 		wav.mono.assign( static_cast< size_t >( seconds * kRate ), 0.0f );
 		std::vector< double > mix( wav.mono.size(), 0.0 );
 		const double          sixteenth = 15.0 / bpm;
-		const int             bars      = static_cast< int >( seconds / ( 16 * sixteenth ) ) + 1;
-		auto                  put       = [ & ]( const std::vector< double >& s, double at, double gain ) {
+		const int             bars      = static_cast< int >( ( seconds - from ) / ( 16 * sixteenth ) ) + 1;
+		auto                  put       = [ & ]( const std::vector< double >& s, double offset, double gain ) {
+            const double at = from + offset;
+            if( at >= until || at < 0.0 )
+                return;
             const size_t i0 = static_cast< size_t >( std::llround( at * kRate ) );
             for( size_t i = 0; i < s.size() && i0 + i < mix.size(); ++i )
                 mix[ i0 + i ] += gain * s[ i ];
@@ -1915,6 +1927,90 @@ std::string listSends( const std::vector< std::pair< double, double > >& r )
 	return out.empty() ? "none" : out;
 }
 
+/// Two instances in one process, each with its own audio and set-up, sharing
+/// one fake Resolume; A runs first in every frame, as the first clip would.
+struct PairRun
+{
+	std::vector< std::pair< double, double > > fromA, fromB;
+	TempoSender::State                         a = TempoSender::State::Off, b = TempoSender::State::Off;
+	double                                     resolume = 0.0;
+};
+
+PairRun pairRun( const BinsAt& audioA, const BinsAt& audioB, double seconds, const std::function< void( PatternPlugin& ) >& setUpA,
+				 const std::function< void( PatternPlugin& ) >& setUpB )
+{
+	FakeResolume res;
+	PairRun      run;
+	auto         a = std::make_unique< PatternPlugin >(), b = std::make_unique< PatternPlugin >();
+	a->tempoSinkForTest = [ & ]( double bpm ) { run.fromA.emplace_back( res.now, bpm ); res.tempo = bpm; return true; };
+	b->tempoSinkForTest = [ & ]( double bpm ) { run.fromB.emplace_back( res.now, bpm ); res.tempo = bpm; return true; };
+	for( PatternPlugin* p : { a.get(), b.get() } )
+	{
+		p->ForceSecondsClock();
+		p->SetFloatParameter( PT_SEND_TEMPO, 1.0f );
+	}
+	if( setUpA )
+		setUpA( *a );
+	if( setUpB )
+		setUpB( *b );
+	float     bins[ kBins ];
+	const int frames = static_cast< int >( seconds * 60.0 );
+	for( int f = 0; f < frames; ++f )
+	{
+		const double t = f / 60.0;
+		res.now        = t;
+		for( PatternPlugin* p : { a.get(), b.get() } )
+		{
+			p->SetBeatInfo( static_cast< float >( res.tempo ), 0.0f );
+			( p == a.get() ? audioA : audioB )( f, 60.0, bins );
+			inject( *p, bins );
+			p->Advance( t );
+			p->StepTempoSend( t );
+		}
+	}
+	run.a        = a->Sender().GetState();
+	run.b        = b->Sender().GetState();
+	run.resolume = res.tempo;
+	return run;
+}
+
+BinsAt programmeOf( const std::vector< Segment >& programme )
+{
+	return [ programme ]( int f, double fps, float* bins ) { segmentBins( programme, f, fps, bins ); };
+}
+
+/// Two renders laid over each other with gains that follow time: a change of
+/// music in a DJ's terms (a cut, a gap, a crossfade).
+Wav mixed( const Wav& a, const Wav& b, const std::function< double( double ) >& gainA, const std::function< double( double ) >& gainB )
+{
+	Wav out;
+	out.rate = a.rate;
+	out.mono.assign( std::max( a.mono.size(), b.mono.size() ), 0.0f );
+	for( size_t i = 0; i < out.mono.size(); ++i )
+	{
+		const double t = i / a.rate;
+		double       v = 0.0;
+		if( i < a.mono.size() )
+			v += gainA( t ) * a.mono[ i ];
+		if( i < b.mono.size() )
+			v += gainB( t ) * b.mono[ i ];
+		out.mono[ i ] = static_cast< float >( v );
+	}
+	return out;
+}
+
+/// v0.2.1's checks each name the v0.2.0 rule they replace as their negative
+/// control; this is all of them at once, for the record.
+void v020Rules( PatternPlugin& p )
+{
+	p.StateForTest().debug.noFastRelock  = true;
+	p.StateForTest().debug.averageThree  = true;
+	p.StateForTest().debug.staleRevival  = true;
+	p.SenderForTest().debug.keepOwnership = true;
+	p.SenderForTest().debug.lastSentOnly  = true;
+	p.debugSenderOnlyStatus               = true;
+}
+
 const char* stateName( TempoSender::State s )
 {
 	switch( s )
@@ -1926,6 +2022,7 @@ const char* stateName( TempoSender::State s )
 	case TempoSender::State::NotTaken: return "NotTaken";
 	case TempoSender::State::Failed: return "Failed";
 	case TempoSender::State::NotOwner: return "NotOwner";
+	case TempoSender::State::Overridden: return "Overridden";
 	}
 	return "?";
 }
@@ -2173,6 +2270,178 @@ int runSend()
 		Check( TempoSender::Owner() == 0, "  a destroyed owner lets go at once" );
 	}
 
+	// ---- v0.2.1 (issue #5, "slow to follow, sometimes sends nothing") ----
+	std::printf( "\n  v0.2.1:\n" );
+
+	// A steady groove is sent once. At 30 fps a backbeat at 128 reads 127.7
+	// and 128.4 by turns, and v0.2.0's mean of three crossed the 0.5 BPM
+	// line every few seconds.
+	const Wav backbeat128 = Groove::render( Groove::Backbeat, 128.0, 60.0 );
+	auto steady128 = [ & ]( bool averageThree ) {
+		return sendRun( backbeat128, 30.0, 60.0, [ averageThree ]( PatternPlugin& p ) { p.StateForTest().debug.averageThree = averageThree; } );
+	};
+	{
+		const SendRun r = steady128( false );
+		Check( r.received.size() == 1 && std::fabs( r.received[ 0 ].second - 128.0 ) <= 0.5,
+			   "a backbeat at 128, 30 fps, 60 s: ONE send (" + listSends( r.received ) + ")" );
+	}
+
+	// The job goes to whoever has something to say. A hears nothing it can
+	// confirm, B hears a beat: B sends, whichever ran first.
+	const std::vector< Segment > silence = { { 1e9, Synth::Silence, 0.0 } };
+	const std::vector< Segment > beat128 = { { 1e9, Synth::Metronome, 128.0 } };
+	auto handOver = [ & ]( bool keepOwnership ) {
+		const auto keep = [ keepOwnership ]( PatternPlugin& p ) { p.SenderForTest().debug.keepOwnership = keepOwnership; };
+		PairRun quiet = pairRun( programmeOf( silence ), programmeOf( beat128 ), 20.0, keep, keep );
+		// A sends, then its music stops (its clip still runs); B has a beat.
+		PairRun stops = pairRun( programmeOf( { { 15.0, Synth::Metronome, 120.0 }, { 1e9, Synth::Silence, 0.0 } } ),
+								 programmeOf( beat128 ), 30.0, keep, keep );
+		// A sends Default BPM (When Lost = Default, nothing heard); B has a beat.
+		PairRun fallback = pairRun( programmeOf( silence ), programmeOf( beat128 ), 20.0,
+									[ & ]( PatternPlugin& p ) {
+										keep( p );
+										p.SetFloatParameter( PT_WHEN_LOST, 1.0f );
+										p.SetFloatParameter( PT_DEFAULT_BPM, 110.0f );
+									},
+									keep );
+		return std::vector< PairRun >{ quiet, stops, fallback };
+	};
+	auto sentB = []( const PairRun& r ) { return !r.fromB.empty() && std::fabs( r.fromB.back().second - 128.0 ) <= 0.5 && std::fabs( r.resolume - 128.0 ) <= 0.5; };
+	{
+		const auto runs = handOver( false );
+		Check( runs[ 0 ].fromA.empty() && sentB( runs[ 0 ] ) && runs[ 0 ].a == TempoSender::State::Waiting,
+			   std::string( "two instances, A (first to run) hears silence, B a beat at 128: B sends (A: " ) + listSends( runs[ 0 ].fromA ) +
+				   ", " + stateName( runs[ 0 ].a ) + "; B: " + listSends( runs[ 0 ].fromB ) + ")" );
+		Check( runs[ 1 ].fromA.size() == 1 && sentB( runs[ 1 ] ) && runs[ 1 ].fromB.front().first >= 15.0 &&
+				   runs[ 1 ].fromB.front().first <= 15.0 + kTempoSilenceSeconds + 1.0,
+			   "  A sends 120, its music stops at 15 s, B takes over within " + F( kTempoSilenceSeconds + 1.0, 0 ) + " s (A: " +
+				   listSends( runs[ 1 ].fromA ) + "; B: " + listSends( runs[ 1 ].fromB ) + ")" );
+		Check( runs[ 2 ].fromA.size() == 1 && runs[ 2 ].fromA.front().second == 110.0 && sentB( runs[ 2 ] ) &&
+				   runs[ 2 ].a == TempoSender::State::NotOwner,
+			   "  A sends only Default BPM (110), B confirms 128: B's detected tempo wins (A: " + listSends( runs[ 2 ].fromA ) + "; B: " +
+				   listSends( runs[ 2 ].fromB ) + ")" );
+	}
+
+	// The status row says HOLD when what is playing has no confirmed tempo,
+	// whatever Tempo Source is (here Host, where the header shows no `?`).
+	// A beat for 20 s, then something nothing confirms.
+	const std::vector< Segment > beatThenNoise = { { 20.0, Synth::Metronome, 124.0 }, { 1e9, Synth::Noise, 0.0 } };
+	struct StatusRows
+	{
+		std::string before, during;///< the row at 3 s (nothing confirmed yet) and at 18 s (locked)
+		double      lastOk   = -1.0;///< after 20 s: the last frame the row said "<value> OK" with no `?`
+		double      holdFrom = -1.0;///< after 20 s: HOLD from here to the end, or -1
+	};
+	auto statusRows = [ & ]( bool senderOnly, int whenLost ) {
+		StatusRows out;
+		sendRun( beatThenNoise, 45.0,
+				 [ senderOnly, whenLost ]( PatternPlugin& p ) {
+					 // v0.2.0's row came from a sender that also kept the job, and
+					 // so its last state, with nothing to send.
+					 p.debugSenderOnlyStatus                = senderOnly;
+					 p.SenderForTest().debug.keepOwnership = senderOnly;
+					 p.SetFloatParameter( PT_WHEN_LOST, static_cast< float >( whenLost ) );
+				 },
+				 [ & ]( double t, PatternPlugin& p, FakeResolume& ) {
+					 if( t <= 1.0 / 60.0 )
+						 return;// the row is the frame before's
+					 const std::string row = rowText( p, 1 );
+					 if( std::fabs( t - 3.0 ) < 1e-9 )
+						 out.before = row;
+					 if( std::fabs( t - 18.0 ) < 1e-9 )
+						 out.during = row;
+					 if( t <= 20.0 )
+						 return;
+					 const bool ok = row.size() > 3 && row.compare( row.size() - 3, 3, " OK" ) == 0 && row.find( '?' ) == std::string::npos;
+					 if( ok )
+						 out.lastOk = t;
+					 if( row == "OSC 7000 HOLD" )
+					 {
+						 if( out.holdFrom < 0.0 )
+							 out.holdFrom = t;
+					 }
+					 else
+						 out.holdFrom = -1.0;
+				 } );
+		return out;
+	};
+	auto lockedRow = []( const std::string& row ) {
+		return row.rfind( "OSC 7000 124.", 0 ) == 0 && row.size() == 17 && row.compare( 14, 3, " OK" ) == 0;
+	};
+	{
+		const StatusRows h = statusRows( false, 0 );
+		Check( h.before == "OSC 7000 HOLD" && lockedRow( h.during ) && h.holdFrom > 20.0 && h.holdFrom <= 28.0 && h.lastOk < h.holdFrom,
+			   "Hold, Tempo Source Host, a beat at 124 then noise from 20 s: the row reads \"" + h.before + "\" before the lock, \"" +
+				   h.during + "\" at 18 s, and \"OSC 7000 HOLD\" from " + F( h.holdFrom, 2 ) + " s to the end (OK last at " +
+				   F( h.lastOk, 2 ) + " s)" );
+		const StatusRows d = statusRows( false, 1 );
+		Check( d.before == "OSC 7000 120.0? OK" && lockedRow( d.during ) && d.lastOk > 20.0 && d.lastOk <= 28.0,
+			   "  When Lost = Default: \"" + d.before + "\" before the lock (Default BPM, marked ?), \"" + d.during +
+				   "\" at 18 s, no plain OK after " + F( d.lastOk, 2 ) + " s" );
+	}
+
+	// A confirmation from before a silence does not come back with the
+	// sound: When Lost = Default sends Default BPM in the silence and then
+	// the new tempo, never the old one again.
+	const std::vector< Segment > gapThen128 = { { 30.0, Synth::Metronome, 124.0 }, { 33.0, Synth::Silence, 0.0 }, { 1e9, Synth::Metronome, 128.0 } };
+	auto afterGap = [ & ]( bool staleRevival ) {
+		return sendRun( gapThen128, 50.0, [ staleRevival ]( PatternPlugin& p ) {
+			p.StateForTest().debug.staleRevival = staleRevival;
+			p.SetFloatParameter( PT_WHEN_LOST, 1.0f );
+		} );
+	};
+	auto oldAgain = []( const SendRun& r ) {
+		int n = 0;
+		for( const auto& s : r.received )
+			n += s.first >= 30.0 && std::fabs( s.second - 124.0 ) <= 0.5;
+		return n;
+	};
+	{
+		const SendRun r = afterGap( false );
+		Check( oldAgain( r ) == 0 && !r.received.empty() && std::fabs( r.received.back().second - 128.0 ) <= 0.5,
+			   "When Lost = Default, 124, three seconds of silence at 30 s, then 128: 124 is not sent again (" + listSends( r.received ) + ")" );
+	}
+
+	// Compared with Resolume's tempo as well as the last value sent: after
+	// NOT TAKEN, a new value 0.5 from what Resolume has goes out even though
+	// it is within 0.5 of the value that never arrived.
+	const std::vector< Segment > nudged = { { 20.0, Synth::Metronome, 120.0 }, { 1e9, Synth::Metronome, 120.4 } };
+	auto notTakenThenOn = [ & ]( bool lastSentOnly ) {
+		return sendRun( nudged, 40.0, [ lastSentOnly ]( PatternPlugin& p ) { p.SenderForTest().debug.lastSentOnly = lastSentOnly; },
+						[]( double t, PatternPlugin&, FakeResolume& res ) {
+							if( t == 0.0 )
+								res.takes = false;
+							if( std::fabs( t - 20.0 ) < 1e-9 )
+								res.takes = true;// OSC Input switched on
+						} );
+	};
+	{
+		const SendRun r = notTakenThenOn( false );
+		Check( std::fabs( r.resolume - 120.0 ) <= 0.5,
+			   "NOT TAKEN until OSC Input goes on at 20 s, the tempo then moves 0.4: Resolume gets it (" + listSends( r.received ) +
+				   "; Resolume at " + F( r.resolume, 1 ) + ")" );
+	}
+
+	// The operator rule wins over that comparison: a tempo set by hand during
+	// a break stays when the same beat comes back, and the row says so.
+	const std::vector< Segment > breakThenSame = { { 15.0, Synth::Metronome, 120.0 }, { 20.0, Synth::Silence, 0.0 }, { 1e9, Synth::Metronome, 120.0 } };
+	auto handInBreak = [ & ]( bool ignoreHand, std::string& row ) {
+		return sendRun( breakThenSame, 40.0, [ ignoreHand ]( PatternPlugin& p ) { p.SenderForTest().debug.ignoreHand = ignoreHand; },
+						[ & ]( double t, PatternPlugin& p, FakeResolume& res ) {
+							if( std::fabs( t - 18.0 ) < 1e-9 )
+								res.tempo = 126.0;
+							if( std::fabs( t - 39.0 ) < 1e-9 )
+								row = rowText( p, 1 );
+						} );
+	};
+	{
+		std::string   row;
+		const SendRun r = handInBreak( false, row );
+		Check( r.received.size() == 1 && r.resolume == 126.0 && row == "OSC 7000 120.0 OVERRIDDEN",
+			   "120 sent, the operator sets 126 in a break at 18 s, the same beat comes back at 20 s: no send (" + listSends( r.received ) +
+				   "; Resolume at " + F( r.resolume, 1 ) + "; row \"" + row + "\")" );
+	}
+
 	std::printf( "\n  negative controls -- must FAIL:\n" );
 	{
 		const SendRun r = sendRun( steady120, 60.0, []( PatternPlugin& p ) { p.SenderForTest().debug.noHysteresis = true; } );
@@ -2184,6 +2453,222 @@ int runSend()
 		const size_t sent = noiseSends( true, worst );
 		Check( sent > 0, "trusting every publication (unconfirmedTempo), the same noise sends " + std::to_string( sent ) +
 							 " tempos (most in one run -- " + worst + ")" );
+	}
+	{
+		const SendRun r = steady128( true );
+		Check( r.received.size() > 1, "v0.2.0's mean of three (averageThree): the backbeat at 128, 30 fps, is sent " +
+										  std::to_string( r.received.size() ) + " times (" + listSends( r.received ) + ")" );
+	}
+	{
+		const auto runs = handOver( true );
+		Check( !sentB( runs[ 0 ] ) && !sentB( runs[ 1 ] ) && !sentB( runs[ 2 ] ),
+			   std::string( "v0.2.0's ownership (keepOwnership): B never sends -- states " ) + stateName( runs[ 0 ].b ) + ", " +
+				   stateName( runs[ 1 ].b ) + ", " + stateName( runs[ 2 ].b ) + "; Resolume at " + F( runs[ 0 ].resolume, 1 ) + ", " +
+				   F( runs[ 1 ].resolume, 1 ) + ", " + F( runs[ 2 ].resolume, 1 ) );
+	}
+	{
+		const StatusRows h = statusRows( true, 0 );
+		Check( !( h.holdFrom > 20.0 && h.holdFrom <= 28.0 && h.lastOk < h.holdFrom ),
+			   "v0.2.0's row (debugSenderOnlyStatus): \"" + h.before + "\" before the lock, never HOLD, and the old tempo OK up to " +
+				   F( h.lastOk, 2 ) + " s of 45" );
+		const StatusRows d = statusRows( true, 1 );
+		Check( d.before != "OSC 7000 120.0? OK",
+			   "  and under Default: \"" + d.before + "\" before the lock, Default BPM shown as if it were the music's" );
+	}
+	{
+		const SendRun r = afterGap( true );
+		Check( oldAgain( r ) > 0, "v0.2.0's revival (staleRevival): 124 is sent again after the silence (" + listSends( r.received ) + ")" );
+	}
+	{
+		const SendRun r = notTakenThenOn( true );
+		Check( !( std::fabs( r.resolume - 120.0 ) <= 0.5 ),
+			   "v0.2.0's comparison with the last value sent (lastSentOnly): Resolume stays at " + F( r.resolume, 1 ) + " (" +
+				   listSends( r.received ) + ")" );
+	}
+	{
+		std::string   row;
+		const SendRun r = handInBreak( true, row );
+		Check( r.resolume != 126.0, "ignoring the hand (ignoreHand): the beat's 120 is sent over the operator's 126 (" +
+										listSends( r.received ) + "; Resolume at " + F( r.resolume, 1 ) + ")" );
+	}
+	return failures == 0 ? 0 : 1;
+}
+
+//---------------------------------------------------------------------------
+// --follow: Tempo Out following a change of music (v0.2.1, issue #5)
+//
+// The release video's house groove at 124 for 30 s, then another groove --
+// house at 128, backbeat at 128, syncopated kick at 140, syncopated pluck
+// at 100, kick-heavy at 90 -- by a hard cut, after a 3 s gap, or through an
+// 8 s crossfade; rendered as audio, at 30 and 60 fps, against the fake
+// Resolume. v0.2.0 took 6 s (5..8) to send a cut and sent the values in
+// between on the way.
+//---------------------------------------------------------------------------
+namespace
+{
+enum Transition
+{
+	Cut,
+	Gap,
+	Fade
+};
+
+struct ChangeCase
+{
+	int    kind;
+	double bpm;
+	int    how;
+	double fps;
+};
+
+struct ChangeResult
+{
+	double latency = -1.0;///< the first send within +-1 BPM of the new tempo, from the change; -1 for none
+	int    sends   = 0;   ///< after the change
+	int    wrong   = 0;   ///< after the change, not within +-1 BPM of the new tempo
+	std::vector< std::pair< double, double > > list;
+};
+
+constexpr double kChangeAt = 30.0, kGapSeconds = 3.0, kFadeSeconds = 8.0, kChangeRun = 60.0;
+
+const char* transitionName( int how )
+{
+	return how == Cut ? "cut" : how == Gap ? "3 s gap" : "8 s crossfade";
+}
+
+ChangeResult changeRun( const ChangeCase& c, const std::function< void( PatternPlugin& ) >& setUp )
+{
+	const double startB = c.how == Gap ? kChangeAt + kGapSeconds : kChangeAt;
+	const double endA   = c.how == Fade ? kChangeAt + kFadeSeconds : kChangeAt;
+	const Wav    a      = Groove::render( Groove::House, 124.0, kChangeRun, 0.0, endA );
+	const Wav    b      = Groove::render( c.kind, c.bpm, kChangeRun, startB );
+	const Wav    w      = mixed(
+        a, b,
+        [ & ]( double t ) { return c.how == Fade ? std::min( 1.0, std::max( 0.0, 1.0 - ( t - kChangeAt ) / kFadeSeconds ) ) : ( t < kChangeAt ? 1.0 : 0.0 ); },
+        [ & ]( double t ) { return c.how == Fade ? std::min( 1.0, std::max( 0.0, ( t - kChangeAt ) / kFadeSeconds ) ) : ( t >= startB ? 1.0 : 0.0 ); } );
+	const SendRun r = sendRun( w, c.fps, kChangeRun, setUp );
+	ChangeResult  out;
+	const double  from = startB;// a gap is timed from the new music, a crossfade from its start
+	for( const auto& s : r.received )
+	{
+		if( s.first < kChangeAt )
+			continue;
+		out.list.push_back( s );
+		++out.sends;
+		const bool right = std::fabs( s.second - c.bpm ) <= 1.0;
+		if( right && out.latency < 0.0 )
+			out.latency = s.first - from;
+		out.wrong += right ? 0 : 1;
+	}
+	return out;
+}
+
+double median( std::vector< double > v )
+{
+	if( v.empty() )
+		return 0.0;
+	std::sort( v.begin(), v.end() );
+	const size_t n = v.size();
+	return n % 2 ? v[ n / 2 ] : 0.5 * ( v[ n / 2 - 1 ] + v[ n / 2 ] );
+}
+
+struct ChangeSummary
+{
+	std::vector< double > latency[ 3 ];///< per transition; a change never sent counts as 99
+	int never = 0, wrong = 0, cutsNotOne = 0;
+	double worstLatency[ 3 ] = {};
+};
+
+ChangeSummary changeSet( const std::function< void( PatternPlugin& ) >& setUp, bool print )
+{
+	const std::pair< int, double > targets[] = { { Groove::House, 128.0 }, { Groove::Backbeat, 128.0 }, { Groove::SyncKick, 140.0 },
+												 { Groove::Arp, 100.0 },  { Groove::KickHeavy, 90.0 } };
+	ChangeSummary sum;
+	for( double fps : { 30.0, 60.0 } )
+		for( int how : { Cut, Gap, Fade } )
+			for( const auto& tg : targets )
+			{
+				const ChangeResult r = changeRun( { tg.first, tg.second, how, fps }, setUp );
+				const double       l = r.latency < 0.0 ? 99.0 : r.latency;
+				sum.latency[ how ].push_back( l );
+				sum.worstLatency[ how ] = std::max( sum.worstLatency[ how ], l );
+				sum.never += r.latency < 0.0;
+				sum.wrong += r.wrong;
+				if( how == Cut && !( r.sends == 1 && r.wrong == 0 ) )
+					++sum.cutsNotOne;
+				if( print )
+					std::printf( "       %-20s %3.0f %-13s %2.0f fps: %s  [%s]\n", Groove::name( tg.first ), tg.second, transitionName( how ), fps,
+								 r.latency < 0.0 ? " never" : ( F( r.latency, 2 ) + " s" ).c_str(), listSends( r.list ).c_str() );
+			}
+	return sum;
+}
+
+/// Locked on a groove for 15 s, then steady noise (the 36 noise renders, at
+/// 30 and 60 fps): a send after 15 s that is not the groove's tempo is false.
+size_t lockThenNoise( const std::function< void( PatternPlugin& ) >& setUp, std::string& worst )
+{
+	const Wav groove = Groove::render( Groove::House, 124.0, 40.0 );
+	size_t    total  = 0;
+	for( uint32_t salt = 1; salt <= 12; ++salt )
+		for( int type : { 0, 1, 2 } )
+		{
+			const Wav w = mixed( groove, noiseWav( salt, type, 40.0 ), []( double t ) { return t < 15.0 ? 1.0 : 0.0; },
+								 []( double t ) { return t < 15.0 ? 0.0 : 1.0; } );
+			for( double fps : { 30.0, 60.0 } )
+			{
+				const SendRun r = sendRun( w, fps, 40.0, setUp );
+				for( const auto& s : r.received )
+					if( s.first >= 15.0 && !( std::fabs( s.second - 124.0 ) <= 1.0 ) )
+					{
+						++total;
+						worst += ( worst.empty() ? "" : "; " ) + std::string( "seed " ) + std::to_string( salt ) + " filter " +
+								 std::to_string( type ) + " " + F( fps, 0 ) + " fps: " + F( s.second, 1 ) + " at " + F( s.first, 2 ) + " s";
+					}
+			}
+		}
+	return total;
+}
+} // namespace
+
+int runFollow()
+{
+	std::printf( "Tempo Out following a change: the house groove at 124 for 30 s, then another groove by a hard cut,\n"
+				 "a 3 s gap or an 8 s crossfade, as audio, 30 and 60 fps, against the fake Resolume (latency from the\n"
+				 "change; a gap from the new music)\n\n" );
+	const ChangeSummary now = changeSet( {}, true );
+	const double cutMedian  = median( now.latency[ Cut ] );
+	std::printf( "\n  median (worst) latency: cut %.2f (%.2f) s, gap %.2f (%.2f) s, crossfade %.2f (%.2f) s\n\n", cutMedian,
+				 now.worstLatency[ Cut ], median( now.latency[ Gap ] ), now.worstLatency[ Gap ], median( now.latency[ Fade ] ),
+				 now.worstLatency[ Fade ] );
+	Check( now.never == 0 && cutMedian <= 5.0, "every change is sent (" + std::to_string( now.never ) +
+												   " never), and a hard cut within 5 s, median over the set (" + F( cutMedian, 2 ) + " s)" );
+	Check( now.cutsNotOne == 0, "every hard cut is ONE message, at the new tempo (" + std::to_string( now.cutsNotOne ) + " of 10 not)" );
+	Check( now.wrong == 0, "no send after a change is anything but the new tempo, over cuts, gaps and crossfades (" +
+							   std::to_string( now.wrong ) + " wrong)" );
+	{
+		std::string  worst;
+		const size_t bad = lockThenNoise( {}, worst );
+		Check( bad == 0, "locked on 124, then 25 s of steady noise (72 runs): " + std::to_string( bad ) + " sends that are not 124" +
+							 ( bad ? " (" + worst + ")" : std::string() ) );
+	}
+
+	std::printf( "\n  negative controls -- must FAIL (v0.2.0's confirmation: no fast re-lock, the mean of three):\n" );
+	const auto v020 = []( PatternPlugin& p ) {
+		p.StateForTest().debug.noFastRelock = true;
+		p.StateForTest().debug.averageThree = true;
+	};
+	const ChangeSummary old = changeSet( v020, std::getenv( "PNTEST_VERBOSE" ) != nullptr );
+	const double oldCut = median( old.latency[ Cut ] );
+	std::printf( "       v0.2.0: median (worst) cut %.2f (%.2f) s, gap %.2f (%.2f) s, crossfade %.2f (%.2f) s\n", oldCut, old.worstLatency[ Cut ],
+				 median( old.latency[ Gap ] ), old.worstLatency[ Gap ], median( old.latency[ Fade ] ), old.worstLatency[ Fade ] );
+	Check( oldCut > 5.0, "a hard cut takes " + F( oldCut, 2 ) + " s, median" );
+	Check( old.cutsNotOne > 0, std::to_string( old.cutsNotOne ) + " of 10 hard cuts are more than one message" );
+	Check( old.wrong > 0, std::to_string( old.wrong ) + " sends after a change are not the new tempo" );
+	std::printf( "\n  negative control -- must FAIL (the fast re-lock on the six-second window's thresholds, R 0.2 and 2 %%):\n" );
+	{
+		std::string  worst;
+		const size_t bad = lockThenNoise( []( PatternPlugin& p ) { p.StateForTest().debug.laxFastRelock = true; }, worst );
+		Check( bad > 0, "locked on 124, then noise: " + std::to_string( bad ) + " sends that are not 124 (" + worst.substr( 0, 160 ) + " ...)" );
 	}
 	return failures == 0 ? 0 : 1;
 }
@@ -3207,7 +3692,7 @@ int main( int argc, char** argv )
 	std::map< std::string, std::function< int() > > checks = {
 		{ "--timing", runTiming }, { "--onset", runOnset },       { "--prime", runPrime }, { "--pitch", runPitch },
 		{ "--ring", runRing },     { "--detected", runDetected }, { "--names", runNames }, { "--list", runList },
-		{ "--groove", runGroove }, { "--send", runSend },     { "--osc", runOsc },
+		{ "--groove", runGroove }, { "--send", runSend },     { "--osc", runOsc },         { "--follow", runFollow },
 		{ "--font", runFont },     { "--grid", runGrid },         { "--bench", runBench },
 	};
 
@@ -3287,7 +3772,7 @@ int main( int argc, char** argv )
 	}
 
 	std::printf( "usage: pntest --timing | --onset | --prime | --pitch | --ring | --detected | --groove\n"
-				 "              --send | --osc | --names | --list | --font | --grid | --bench\n"
+				 "              --send | --follow | --osc | --names | --list | --font | --grid | --bench\n"
 				 "       pntest --tempo-wav f.wav [--truth BPM] [--from S] [--fps N] [--legacy]\n"
 				 "       pntest --out f.png [--size WxH] [--frames N] [--fps N] [--audio PRESET]\n"
 				 "              [--audio-bpm N] [--audio-until S] [--host-bpm N] [--set Name=value ...]\n"

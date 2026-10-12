@@ -289,6 +289,19 @@ char* PatternPlugin::GetParameterDisplay( unsigned int index )
 	return const_cast< char* >( mDisplay.c_str() );
 }
 
+bool PatternPlugin::TempoOutHolding() const
+{
+	// Under Hold, with no confirmed tempo for what is playing now, nothing
+	// new is sent whatever the sender last did -- and whatever Tempo Source
+	// says, which only decides the row clock.
+	if( debugSenderOnlyStatus || mTracker.TempoCurrent() )
+		return false;
+	if( OptionIndex( PT_WHEN_LOST, kWhenLostCount ) != 0 )
+		return false;
+	const TempoSender::State s = mSender.GetState();
+	return s != TempoSender::State::NotOwner && s != TempoSender::State::Failed && s != TempoSender::State::Off;
+}
+
 std::string PatternPlugin::TempoOutStatus() const
 {
 	if( !Bool( mParams[ PT_SEND_TEMPO ] ) )
@@ -296,13 +309,19 @@ std::string PatternPlugin::TempoOutStatus() const
 	char value[ 16 ] = {};
 	std::snprintf( value, sizeof( value ), "%.1f", mSender.LastSent() );
 	const std::string port = std::to_string( Int( PT_OSC_PORT, kOscPortMin, kOscPortMax ) ) + " ";
+	if( TempoOutHolding() )
+		return port + "HOLD";
+	// `?` after the value: it is not a tempo the detector hears now -- Default
+	// BPM, or a confirmed tempo the detector no longer agrees with.
+	const std::string shown = value + std::string( debugSenderOnlyStatus || mTracker.TempoCurrent() ? "" : "?" );
 	switch( mSender.GetState() )
 	{
 	case TempoSender::State::Off:
 	case TempoSender::State::Waiting: return port + "WAITING";
-	case TempoSender::State::Sent: return port + value + " SENT";
-	case TempoSender::State::Taken: return port + value + " OK";
-	case TempoSender::State::NotTaken: return port + value + " NOT TAKEN";
+	case TempoSender::State::Sent: return port + shown + " SENT";
+	case TempoSender::State::Taken: return port + shown + " OK";
+	case TempoSender::State::NotTaken: return port + shown + " NOT TAKEN";
+	case TempoSender::State::Overridden: return port + shown + ( debugSenderOnlyStatus ? " OK" : " OVERRIDDEN" );
 	case TempoSender::State::Failed: return port + "SEND FAILED";
 	case TempoSender::State::NotOwner: return port + "ANOTHER SENDS";
 	}
@@ -326,7 +345,7 @@ void PatternPlugin::StepTempoSend( double wallSeconds )
 		return mUdp.Send( port, debugPlainFloat ? osc::PlainFloat( osc::kTempoAddress, value )
 												: osc::AbsoluteFloat( osc::kTempoAddress, value ) );
 	} );
-	mSender.Step( enabled, mTracker.TempoTarget(), mHostBpm, mHostBpmSeen, wallSeconds, sink );
+	mSender.Step( enabled, mTracker.TempoTarget(), mTracker.TempoLive(), mHostBpm, mHostBpmSeen, wallSeconds, sink );
 
 	if( !enabled )
 	{
@@ -343,14 +362,28 @@ void PatternPlugin::StepTempoSend( double wallSeconds )
 	std::snprintf( value, sizeof( value ), "%.1f", mSender.LastSent() );
 	const std::string where = "127.0.0.1:" + std::to_string( port );
 	std::string       line;
+	if( TempoOutHolding() )
+	{
+		const char* why = mTracker.TempoLive() ? "the detector no longer agrees with the confirmed tempo"
+						  : mTracker.TempoLost() ? "the confirmed tempo is lost (silence, or no confirmation for 8 s)"
+												 : "nothing confirmed yet";
+		line = std::string( "tempo out: HOLD -- " ) + why +
+			   "; When Lost is Hold, so nothing is sent and Resolume keeps its tempo. Tempo Source = Detected shows "
+			   "what the detector hears in the header (BPM n?)";
+		diag::stateChanged( mTag + "tempo out", mTag + line );
+		return;
+	}
 	switch( mSender.GetState() )
 	{
 	case TempoSender::State::Off: line = "tempo out: off"; break;
-	case TempoSender::State::Waiting:
-		line = "tempo out: on, nothing to send yet (no tempo detected, and When Lost is Hold)";
-		break;
+	case TempoSender::State::Waiting: line = "tempo out: on, waiting to send"; break;
 	case TempoSender::State::Sent: line = std::string( "tempo out: sent " ) + value + " BPM to " + where; break;
 	case TempoSender::State::Taken: line = std::string( "tempo out: Resolume's tempo is " ) + value + " BPM"; break;
+	case TempoSender::State::Overridden:
+		line = std::string( "tempo out: Resolume took " ) + value +
+			   " BPM and its tempo was then changed elsewhere (by hand, Ableton Link or another controller); that "
+			   "stays until the detected tempo moves 0.5 BPM";
+		break;
 	case TempoSender::State::NotTaken:
 		line = std::string( "tempo out: Resolume's tempo did not become " ) + value + " BPM after " +
 			   std::to_string( 1 + TempoSender::kMaxResends ) + " sends to " + where +

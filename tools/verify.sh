@@ -20,8 +20,9 @@
 #                 clearing and keeping, a detected tempo within a beat on a
 #                 metronome AND on drum grooves at the right metrical level,
 #                 and Tempo Out -- what is sent to Resolume and when (against
-#                 a fake Resolume) and the exact bytes through a real socket
-#                 on 127.0.0.1, never Resolume's port 7000 -- all
+#                 a fake Resolume), how fast and how cleanly it follows a
+#                 change of music (--follow), and the exact bytes through a
+#                 real socket on 127.0.0.1, never Resolume's port 7000 -- all
 #                 measured on the plugin's published state with NO GL
 #                 context anywhere near them, each with its negative control
 #   grid          and the one check that does read pixels: every glyph on the
@@ -202,7 +203,7 @@ PNTEST="$BUILD/pntest"
 # The tracker. None of these opens a GL context.
 #---------------------------------------------------------------------------
 step "tracker (no GL)"
-for t in timing onset prime pitch ring detected groove send osc names font; do
+for t in timing onset prime pitch ring detected groove send follow osc names font; do
 	log="/tmp/pattern-$t.log"
 	if "$PNTEST" "--$t" >"$log" 2>&1; then
 		pass "pntest --$t"

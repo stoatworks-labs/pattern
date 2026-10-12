@@ -130,12 +130,20 @@
 	- **A window that straddles a change publishes something in between.**
 	  A metronome at 120 turning into noise published 117.72 at R 0.475 as the
 	  window filled; a metronome going silent drifted from 140 to 141.2.
+	  Confirmation stops those two, which end in no beat. It does NOT stop
+	  the in-between values of a change from one beat to another: they move a
+	  little each second, each within 2 % of the last, so they confirm one
+	  after another (v0.2.0 sent a cut from 124 to 128 as 125.0, 127.1 and
+	  127.7). The fast re-lock below is the answer to that.
 
 	So Tempo Out trusts a CONFIRMED tempo: three publications in three
 	consecutive detection cycles (a second apart), each with R at least
 	`kTempoTrustR` (0.3) and each made with sound in the last second, all
-	within the 2 % agreement -- and the tempo is their mean. Over the same 72
-	noise runs that is 0 confirmations (5 at R 0.2); every one of the 45
+	within the 2 % agreement. The tempo is the mean of the RUN: the latest
+	consecutive publications that agree within 2 %, up to
+	`kTempoAverageMax` (8), so a value that crosses the window as the music
+	changes drops out as soon as it disagrees with the newest. Over the same
+	72 noise runs that is 0 confirmations (5 at R 0.2); every one of the 45
 	asserted grooves and the release video's soundtrack confirm, the
 	soundtrack from 6 s. The cost is two seconds: a steady beat is first
 	confirmed at about 6 s, not 4. (The breakbeat and the house groove at
@@ -144,10 +152,59 @@
 	180, as they read.) `debug.unconfirmedTempo` trusts every publication
 	instead, and `pntest --send` requires noise to get through with it.
 
+	Why up to eight and not three (v0.2.1): a settled reading wobbles by a
+	few tenths, and at 30 fps a backbeat at 128 alternated 127.7 / 128.4
+	from one reading to the next, so the mean of three crossed Tempo Out's
+	0.5 BPM line every few seconds and re-sent 127.8, 128.4, 127.8 ... for
+	as long as it played (29 of 150 steady runs re-sent). The mean of up to
+	eight sits still. `debug.averageThree` is v0.2.0's mean of three.
+
+	## A change, once a tempo is live (v0.2.1)
+
+	The six-second window is slow to follow a change: it holds the old music
+	for six seconds, and a window straddling the change publishes values in
+	between, which a run of three then confirms one after another (a hard
+	cut from 124 to 128 was sent as 125.0, 127.1, 127.7, and stayed there).
+	So while a tempo is live, each detection cycle also reads the last THREE
+	seconds (`Estimate( kTempoShortWindow )`), and a change is confirmed at
+	once when two of those readings in a row
+	  - agree within `kTempoFastAgree` (1 %),
+	  - each have R at least `kTempoFastR` (0.5) and sound in the last second,
+	  - average more than `kTempoFastJump` (2 %) from the live tempo,
+	  - and the jump is not x1/2, x2/3, x3/2 or x2 (within 3 %): an octave or
+	    a triplet relative is the metrical-level question the six-second
+	    window and its run of three answer, and keeps the slow path.
+	The value: when the six-second reading of the same cycle agrees with the
+	newer short reading within 1 %, the change is old enough that all three
+	readings are of the new music, and it is their mean (a single short
+	reading scatters by a few tenths of a BPM); when it does not, the change
+	is recent, the earlier short window straddles it and reads in between,
+	and the newer short reading stands alone. For `kTempoFastHoldSeconds` (6)
+	afterwards the six-second window, still holding the old music, cannot
+	move the tempo: a publication that agrees with it only keeps it live and
+	clears the run, and one that disagrees joins a run that may not confirm
+	until the hold is over -- so a wrong re-lock is undone at the end of the
+	hold, before it could go stale. Measured over the house-124 change set
+	(`pntest --follow`): a hard cut is confirmed and sent 3 to 4 s after it,
+	not 5 to 8, as one message. `debug.noFastRelock` is v0.2.0's slow path,
+	and `debug.laxFastRelock` the fast path on the six-second window's
+	thresholds (R 0.2, 2 %), on which a beat turning into noise sends a false
+	tempo in 18 of 72 runs.
+
 	The tempo is LIVE while confirmations keep coming (one within
 	`kTempoLostSeconds`) and there has been sound within
-	`kTempoSilenceSeconds`; once confirmed and no longer live it is LOST.
+	`kTempoSilenceSeconds`; once confirmed and no longer live it is LOST. A
+	silence long enough to lose it ends that confirmation for good: when the
+	sound comes back the tempo stays lost until a new confirmation (v0.2.0
+	let one from before the silence come back to life, so When Lost =
+	Default sent the old tempo again for a moment; `debug.staleRevival`).
 	The header shows `*` only while live, and `?` otherwise.
+
+	`TempoCurrent()` is narrower than live, for Tempo Out's status row: live,
+	and a qualifying publication has agreed with the confirmed tempo within
+	`kTempoCurrentSeconds`. After a cut to music that never confirms, the
+	row stops saying the old tempo is OK within a few seconds rather than
+	after the eight it takes to be lost.
 
 	`TempoTarget()` is what Tempo Out sends: the confirmed tempo while live;
 	otherwise Default BPM when When Lost says Default, else 0 -- Hold sends
@@ -197,6 +254,11 @@ struct TrackerDebug
 	bool   levelDetector = false;///< fires on level, not change: no memory, no rising-edge test
 	double detuneSemitones = 0.0;///< every pitch read this many semitones off
 	bool   unconfirmedTempo = false;///< Tempo Out trusts every publication, not a confirmed run
+	// v0.2.0's rules, one at a time, for the negative controls of the v0.2.1 checks.
+	bool   noFastRelock = false;///< no three-second re-lock: a change waits for the six-second window
+	bool   averageThree = false;///< the confirmed tempo is the mean of the last three, not up to eight
+	bool   staleRevival = false;///< a confirmation from before a silence comes back with the sound
+	bool   laxFastRelock = false;///< the fast re-lock on the six-second window's thresholds (R 0.2, 2 %)
 };
 
 struct Cell
@@ -237,6 +299,14 @@ constexpr double kTempoQuietSeconds   = 1.0; ///< and sound no longer ago than t
 constexpr double kTempoLostSeconds    = 8.0; ///< without a confirmation: lost
 constexpr double kTempoSilenceSeconds = 2.0; ///< of silence: lost
 constexpr double kSoundLevel          = 1e-6;///< a bin above this is sound (the log's own test)
+constexpr int    kTempoAverageMax      = 8;   ///< the confirmed tempo: the mean of up to this many agreeing publications
+constexpr int    kTempoShortWindow     = 300; ///< samples: the fast re-lock reads the last three seconds
+constexpr double kTempoFastR           = 0.5; ///< each short reading's peak correlation, at least
+constexpr double kTempoFastAgree       = 0.01;///< two short readings in a row within this ratio
+constexpr double kTempoFastJump        = 0.02;///< and their mean more than this ratio from the live tempo
+constexpr double kTempoRelatedSlack    = 0.03;///< a jump this close to x1/2, x2/3, x3/2 or x2 keeps the slow path
+constexpr double kTempoFastHoldSeconds = 6.0; ///< after a fast re-lock the six-second window cannot pull it back
+constexpr double kTempoCurrentSeconds  = 3.0; ///< TempoCurrent(): a publication agreed with the tempo this recently
 
 class Tracker
 {
@@ -274,8 +344,13 @@ public:
 	bool    TempoLive() const;
 	/// Confirmed once, and no longer live.
 	bool    TempoLost() const { return ConfirmedBpm() > 0.0 && !TempoLive(); }
+	/// Live, and what the detector hears now still agrees with it: Tempo
+	/// Out's status row says OK only while this holds.
+	bool    TempoCurrent() const;
 	/// What Tempo Out sends; 0 for nothing.
 	double  TempoTarget() const;
+	/// The last confirmation came from the three-second window.
+	bool    FastRelocked() const { return mLastConfirmFast; }
 	double  LastPublishAt() const { return mLastPublishAt; }
 	double  LastConfirmAt() const { return mLastConfirmAt; }
 	double  RawPhase() const { return mRawPhase; }
@@ -294,10 +369,29 @@ private:
 	void   AdvanceRows( double seconds );
 	void   Listen( double seconds, const double* m, double dt );
 	void   FeedTempo( double seconds, const double* bandFlux );
-	void   DetectTempo();
-	void   DetectTempoLegacy( int n );
-	void   Confirm();
-	void   ClearRow( int row );
+
+	/// One reading of the last `n` envelope samples.
+	struct Reading
+	{
+		enum Status
+		{
+			Silent,///< no signal in the window: nothing to say
+			Weak,  ///< R at the chosen lag under kTempoSettleR
+			Read   ///< `bpm` is a reading
+		};
+		Status status = Silent;
+		double bpm    = 0.0;
+		double peak   = 0.0;
+		int    members = 0;
+		double memberBpm[ 5 ]   = {};
+		double memberShare[ 5 ] = {};
+	};
+	Reading Estimate( int n ) const;
+	void    DetectTempo();
+	void    FastRelock( const Reading& wide );
+	void    DetectTempoLegacy( int n );
+	void    Confirm();
+	void    ClearRow( int row );
 
 	TrackerSettings mSettings;
 
@@ -341,10 +435,16 @@ private:
 	double  mLastPublishAt = 0.0;///< seconds: the last publication, a new tempo or the same again
 	double  mLastSoundAt   = 0.0;///< seconds: the last frame with any bin above kSoundLevel
 	bool    mPublished     = false;///< this detection cycle published
-	double  mRun[ kTempoConfirmRun ] = {};///< the latest publications in a run, oldest first
+	double  mRun[ kTempoAverageMax ] = {};///< the run: consecutive agreeing publications, oldest first
 	int     mRunCount      = 0;
 	double  mConfirmedBpm  = 0.0;
 	double  mLastConfirmAt = 0.0;
+	bool    mLastConfirmFast = false;///< the last confirmation was the fast re-lock's
+	double  mLastAgreeAt   = 0.0;///< a qualifying publication last agreed with the confirmed tempo
+	double  mShortPrev     = 0.0;///< the last short reading that qualified, or 0
+	double  mFastBpm       = 0.0;///< this cycle's fast re-lock, or 0
+	double  mFastUntil     = -1e300;///< until then the six-second window cannot pull the tempo back
+	double  mSoundBackAt   = -1e300;///< sound came back after a silence that lost the tempo
 	double  mPeakR         = 0.0;
 	int     mMemberCount   = 0;
 	double  mMemberBpm[ 5 ]   = {};

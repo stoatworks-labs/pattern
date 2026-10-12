@@ -116,8 +116,14 @@ public:
 	/// harness calls it directly.
 	void StepTempoSend( double wallSeconds );
 
-	/// Row 1's text while Send Tempo is on ("7000 125.0 OK"), else empty.
+	/// Row 1's text while Send Tempo is on ("7000 125.0 OK", "7000 HOLD"),
+	/// else empty.
 	std::string TempoOutStatus() const;
+
+	/// The v0.2.1 status-row check's negative control: the row from the
+	/// sender's state alone, as v0.2.0 drew it (a stale "125.0 OK" while
+	/// the music playing now is unconfirmed). Not reachable from a parameter.
+	bool debugSenderOnlyStatus = false;
 
 	const TempoSender& Sender() const { return mSender; }
 	TempoSender&       SenderForTest() { return mSender; }
@@ -132,7 +138,10 @@ public:
 	bool debugPlainFloat = false;
 
 private:
-	int OptionIndex( unsigned int param, int count ) const;
+	int  OptionIndex( unsigned int param, int count ) const;
+	/// Send Tempo on, When Lost on Hold, and no confirmed tempo for what is
+	/// playing now: the status row says HOLD.
+	bool TempoOutHolding() const;
 	int Int( unsigned int param, int lo, int hi ) const;
 
 	float mParams[ PT_COUNT_ ] = {};

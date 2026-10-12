@@ -195,6 +195,11 @@ namespace
 /// the bundle: no thread_local, nothing that would pin the image.
 std::atomic< int >     sOwner{ 0 };
 std::atomic< int64_t > sOwnerBeatMs{ 0 };
+/// Whether the owner's target is a detected tempo rather than Default BPM.
+std::atomic< bool > sOwnerLive{ false };
+/// The last instance to hold the job, still set after it let go: a sender
+/// that gets the job back can tell whether anyone else had it meanwhile.
+std::atomic< int > sLastOwner{ 0 };
 
 int64_t Ms( double seconds )
 {
@@ -212,21 +217,26 @@ double TempoSender::Rounded( double bpm )
 	return std::round( bpm * 10.0 ) / 10.0;
 }
 
-bool TempoSender::Claim( double now )
+bool TempoSender::Claim( double now, bool live )
 {
 	int current = sOwner.load();
 	if( current == mInstance )
 	{
 		sOwnerBeatMs.store( Ms( now ) );
+		sOwnerLive.store( live );
 		return true;
 	}
-	if( current == 0 || Ms( now ) - sOwnerBeatMs.load() > Ms( kOwnerTimeout ) )
+	const bool free     = current == 0 || Ms( now ) - sOwnerBeatMs.load() > Ms( kOwnerTimeout );
+	const bool outranks = live && !sOwnerLive.load() && !debug.keepOwnership;// a detected tempo over Default BPM
+	if( ( free || outranks ) && sOwner.compare_exchange_strong( current, mInstance ) )
 	{
-		if( sOwner.compare_exchange_strong( current, mInstance ) )
-		{
-			sOwnerBeatMs.store( Ms( now ) );
-			return true;
-		}
+		sOwnerBeatMs.store( Ms( now ) );
+		sOwnerLive.store( live );
+		// Another instance had the job since this one last did: what is in
+		// Resolume now is its doing, not this sender's.
+		if( sLastOwner.exchange( mInstance ) != mInstance )
+			Reset();
+		return true;
 	}
 	return false;
 }
@@ -238,11 +248,18 @@ void TempoSender::Release()
 		sOwner.compare_exchange_strong( me, 0 );
 }
 
-void TempoSender::Forget()
+void TempoSender::Reset()
 {
 	mLastSent   = 0.0;
 	mLastSendAt = -1e300;
 	mResends    = 0;
+	mDelivered  = false;
+	mByHand     = false;
+}
+
+void TempoSender::Forget()
+{
+	Reset();
 	if( mState != State::Off && mState != State::NotOwner )
 		mState = State::Waiting;
 }
@@ -252,50 +269,81 @@ bool TempoSender::Transmit( double value, double now, const Sink& sink )
 	const bool ok = sink ? sink( value ) : false;
 	mLastSent     = value;
 	mLastSendAt   = now;
+	mDelivered    = false;
+	mByHand       = false;
 	++mSends;
 	mState = ok ? State::Sent : State::Failed;
 	return true;
 }
 
-bool TempoSender::Step( bool enabled, double target, double hostBpm, bool hostSeen, double now, const Sink& sink )
+bool TempoSender::Step( bool enabled, double target, bool live, double hostBpm, bool hostSeen, double now, const Sink& sink )
 {
 	if( !enabled )
 	{
 		Release();
-		mState      = State::Off;
-		mLastSent   = 0.0;
-		mLastSendAt = -1e300;
-		mResends    = 0;
+		Reset();
+		mState = State::Off;
 		return false;
 	}
-	if( !Claim( now ) )
+
+	auto atHost = [ & ]( double v ) { return hostSeen && std::fabs( hostBpm - v ) <= kAckTolerance; };
+
+	// Watched every frame, owner or not: Resolume's tempo became the value
+	// sent (delivered), or later left it without this sender (by hand).
+	if( mLastSent > 0.0 && atHost( mLastSent ) )
+	{
+		mDelivered = true;
+		mByHand    = false;
+	}
+	else if( mDelivered && hostSeen )
+		mByHand = true;
+
+	const bool hasTarget = target > 0.0 && std::isfinite( target );
+	if( !hasTarget && !debug.keepOwnership )
+	{
+		// Nothing to say: do not hold the job, so another instance that has
+		// a tempo can send it.
+		Release();
+		mState = State::Waiting;
+		return false;
+	}
+	if( !Claim( now, hasTarget && live ) )
 	{
 		// Somebody else owns the tempo. Start from nothing if we ever get it.
-		mState      = State::NotOwner;
-		mLastSent   = 0.0;
-		mLastSendAt = -1e300;
-		mResends    = 0;
+		mState = State::NotOwner;
+		Reset();
 		return false;
 	}
 	if( mState == State::Off || mState == State::NotOwner )
 		mState = State::Waiting;
 
-	auto atHost = [ & ]( double v ) { return hostSeen && std::fabs( hostBpm - v ) <= kAckTolerance; };
-
-	if( target > 0.0 && std::isfinite( target ) )
+	if( hasTarget )
 	{
-		const double value   = Rounded( target );
-		const bool   changed = mLastSent <= 0.0 || std::fabs( value - mLastSent ) >= kHysteresis || debug.noHysteresis;
-		if( changed )
+		const double value = Rounded( target );
+		// The music's tempo moved from what this sender last said (v0.2.0's
+		// whole test) ...
+		const bool moved = mLastSent <= 0.0 || std::fabs( value - mLastSent ) >= kHysteresis || debug.noHysteresis;
+		// ... or Resolume's tempo is somewhere else, when Resolume does not
+		// hold this sender's last value. While it does, that value IS
+		// Resolume's tempo and the test above is the same test. When it held
+		// it and somebody then moved it by hand, the hand's tempo is theirs
+		// to keep until the music moves. And a value still being sent is the
+		// resends' business below.
+		const bool pending   = value == mLastSent && ( mState == State::Sent || mState == State::NotTaken || mState == State::Failed );
+		const bool notHeld   = !mDelivered || ( mByHand && debug.ignoreHand );
+		const bool elsewhere = !debug.lastSentOnly && hostSeen && notHeld && std::fabs( value - hostBpm ) >= kHysteresis && !pending;
+		if( moved || elsewhere )
 		{
 			if( now - mLastSendAt < kInterval )
 				return false;
 			if( atHost( value ) && !debug.noHysteresis )
 			{
 				// Resolume is already there: nothing to say.
-				mLastSent = value;
-				mResends  = 0;
-				mState    = State::Taken;
+				mLastSent  = value;
+				mDelivered = true;
+				mByHand    = false;
+				mResends   = 0;
+				mState     = State::Taken;
 				return false;
 			}
 			mResends = 0;
@@ -303,11 +351,11 @@ bool TempoSender::Step( bool enabled, double target, double hostBpm, bool hostSe
 		}
 	}
 
-	// Waiting to hear that Resolume took the last value -- or late news that
-	// it did, after the sender had given up.
-	if( ( mState == State::Sent || mState == State::NotTaken ) && atHost( mLastSent ) )
+	// Resolume has the value (or had it, before a hand moved it) -- late news
+	// included, after the sender had given up.
+	if( mDelivered )
 	{
-		mState = State::Taken;
+		mState = mByHand ? State::Overridden : State::Taken;
 		return false;
 	}
 	if( mState == State::Sent || mState == State::Failed )

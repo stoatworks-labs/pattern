@@ -96,6 +96,12 @@ void Tracker::Reset()
 	mRunCount      = 0;
 	mConfirmedBpm  = 0.0;
 	mLastConfirmAt = 0.0;
+	mLastConfirmFast = false;
+	mLastAgreeAt   = 0.0;
+	mShortPrev     = 0.0;
+	mFastBpm       = 0.0;
+	mFastUntil     = -1e300;
+	mSoundBackAt   = -1e300;
 	mPeakR         = 0.0;
 	mMemberCount   = 0;
 	bands::BandEdges( mSettings.channels, mSettings.binLaw, mSettings.gamma, mEdges );
@@ -144,7 +150,16 @@ double Tracker::CurrentBpm() const
 bool Tracker::TempoLive() const
 {
 	const double since = debug.unconfirmedTempo ? mLastPublishAt : mLastConfirmAt;
-	return ConfirmedBpm() > 0.0 && mNow - since <= kTempoLostSeconds && mNow - mLastSoundAt <= kTempoSilenceSeconds;
+	// A confirmation made before a silence that lost the tempo stays dead
+	// when the sound comes back: the music after a silence is new music.
+	const bool beforeSilence = !debug.staleRevival && since < mSoundBackAt;
+	return ConfirmedBpm() > 0.0 && !beforeSilence && mNow - since <= kTempoLostSeconds &&
+		   mNow - mLastSoundAt <= kTempoSilenceSeconds;
+}
+
+bool Tracker::TempoCurrent() const
+{
+	return TempoLive() && mNow - std::max( mLastAgreeAt, mLastConfirmAt ) <= kTempoCurrentSeconds;
 }
 
 double Tracker::TempoTarget() const
@@ -158,31 +173,78 @@ double Tracker::TempoTarget() const
 
 void Tracker::Confirm()
 {
+	const auto agrees = []( double a, double b ) { return b > 0.0 && std::fabs( a / b - 1.0 ) <= kTempoAgree; };
+	if( mFastBpm > 0.0 )
+	{
+		// The three-second window has agreed with itself on a clear change.
+		mConfirmedBpm    = mFastBpm;
+		mLastConfirmAt   = mNow;
+		mLastConfirmFast = true;
+		mFastUntil       = mNow + kTempoFastHoldSeconds;
+		mRunCount        = 0;
+		return;
+	}
 	// A cycle that did not publish, or published on little evidence, or with
 	// no sound to speak of, breaks the run.
-	if( !mPublished || !( mPeakR >= kTempoTrustR ) || mNow - mLastSoundAt > kTempoQuietSeconds )
+	const bool qualifies = mPublished && mPeakR >= kTempoTrustR && mNow - mLastSoundAt <= kTempoQuietSeconds;
+	if( !qualifies )
 	{
 		mRunCount = 0;
 		return;
 	}
-	for( int i = 0; i + 1 < kTempoConfirmRun; ++i )
-		mRun[ i ] = mRun[ i + 1 ];
-	mRun[ kTempoConfirmRun - 1 ] = mDetectedBpm;
-	mRunCount                    = std::min( mRunCount + 1, kTempoConfirmRun );
-	if( mRunCount < kTempoConfirmRun )
+	const bool hold = mNow < mFastUntil;
+	if( agrees( mDetectedBpm, mConfirmedBpm ) )
+	{
+		mLastAgreeAt = mNow;
+		if( hold )
+		{
+			// For a while after a fast re-lock the six-second window still
+			// holds the old music, and what it publishes is in between. It
+			// cannot move the tempo: a publication that agrees keeps the
+			// re-lock live and clears the run of anything in between ...
+			mLastConfirmAt = mNow;
+			mRunCount      = 0;
+			return;
+		}
+	}
+	// The run: the latest consecutive publications that agree within 2 %,
+	// up to eight (v0.2.0: three). Dropping the oldest while they disagree
+	// keeps the longest run that agrees, so a value from before a change
+	// leaves it as soon as the newest disagrees with it.
+	const int cap = debug.averageThree ? kTempoConfirmRun : kTempoAverageMax;
+	if( mRunCount == cap )
+	{
+		for( int i = 0; i + 1 < mRunCount; ++i )
+			mRun[ i ] = mRun[ i + 1 ];
+		--mRunCount;
+	}
+	mRun[ mRunCount++ ] = mDetectedBpm;
+	for( ;; )
+	{
+		double lo = mRun[ 0 ], hi = mRun[ 0 ];
+		for( int i = 1; i < mRunCount; ++i )
+		{
+			lo = std::min( lo, mRun[ i ] );
+			hi = std::max( hi, mRun[ i ] );
+		}
+		if( hi / lo - 1.0 <= kTempoAgree )
+			break;
+		for( int i = 0; i + 1 < mRunCount; ++i )
+			mRun[ i ] = mRun[ i + 1 ];
+		--mRunCount;
+	}
+	// ... and one that disagrees joins a run that cannot confirm until the
+	// hold is over: if the window says something else for the whole hold,
+	// the re-lock was wrong and that run confirms the moment the hold ends,
+	// while the re-lock is still live.
+	if( mRunCount < kTempoConfirmRun || hold )
 		return;
-	double lo = mRun[ 0 ], hi = mRun[ 0 ], sum = 0.0;
-	for( double b : mRun )
-	{
-		lo = std::min( lo, b );
-		hi = std::max( hi, b );
-		sum += b;
-	}
-	if( hi / lo - 1.0 <= kTempoAgree )
-	{
-		mConfirmedBpm  = sum / kTempoConfirmRun;
-		mLastConfirmAt = mNow;
-	}
+	double sum = 0.0;
+	for( int i = 0; i < mRunCount; ++i )
+		sum += mRun[ i ];
+	mConfirmedBpm    = sum / mRunCount;
+	mLastConfirmAt   = mNow;
+	mLastConfirmFast = false;
 }
 
 int Tracker::Vu( int channel ) const
@@ -209,7 +271,11 @@ void Tracker::Prime( double seconds, const double* m )
 	mLastPublishAt = seconds;
 	mLastSoundAt   = seconds;
 	mLastConfirmAt = seconds;
+	mLastAgreeAt   = seconds;
 	mRunCount      = 0;
+	mShortPrev     = 0.0;
+	mFastUntil     = -1e300;
+	mSoundBackAt   = -1e300;
 
 	if( debug.noPrime )
 	{
@@ -416,7 +482,75 @@ void Tracker::FeedTempo( double seconds, const double* bandFlux )
 
 void Tracker::DetectTempo()
 {
-	const int n = static_cast< int >( std::min< int64_t >( mEnvIndex + 1, kTempoWindow ) );
+	const int     n = static_cast< int >( std::min< int64_t >( mEnvIndex + 1, kTempoWindow ) );
+	const Reading t = Estimate( n );
+	// The fast re-lock is judged against the tempo as it stood before this
+	// cycle (nothing above has touched it).
+	FastRelock( t );
+	if( t.status == Reading::Silent )
+		return;
+	if( t.status == Reading::Weak )
+	{
+		mCandidateBpm = 0.0;
+		return;
+	}
+	const auto agrees  = []( double a, double b ) { return b > 0.0 && std::fabs( a / b - 1.0 ) <= kTempoAgree; };
+	const bool publish = agrees( t.bpm, mCandidateBpm ) || agrees( t.bpm, mDetectedBpm );
+	mCandidateBpm      = t.bpm;
+	mPeakR             = t.peak;
+	mMemberCount       = t.members;
+	for( int i = 0; i < t.members; ++i )
+	{
+		mMemberBpm[ i ]   = t.memberBpm[ i ];
+		mMemberShare[ i ] = t.memberShare[ i ];
+	}
+	if( publish )
+	{
+		mDetectedBpm   = t.bpm;
+		mLastPublishAt = mNow;
+		mPublished     = true;
+	}
+}
+
+void Tracker::FastRelock( const Reading& wide )
+{
+	mFastBpm = 0.0;
+	if( debug.noFastRelock || !( mConfirmedBpm > 0.0 ) || !TempoLive() )
+	{
+		mShortPrev = 0.0;
+		return;
+	}
+	// The evidence the short window needs is stricter than the long one's:
+	// on the long window's own thresholds (R 0.2, 2 %, `debug.laxFastRelock`)
+	// a beat turning into noise sends a false tempo in 18 of 72 runs.
+	const double  fastR     = debug.laxFastRelock ? kTempoSettleR : kTempoFastR;
+	const double  fastAgree = debug.laxFastRelock ? kTempoAgree : kTempoFastAgree;
+	const Reading s         = Estimate( kTempoShortWindow );
+	const bool    good = s.status == Reading::Read && s.peak >= fastR && mNow - mLastSoundAt <= kTempoQuietSeconds;
+	if( good && mShortPrev > 0.0 && std::fabs( s.bpm / mShortPrev - 1.0 ) <= fastAgree )
+	{
+		const double ratio   = 0.5 * ( s.bpm + mShortPrev ) / mConfirmedBpm;
+		bool         related = false;
+		for( double k : { 0.5, 2.0 / 3.0, 1.5, 2.0 } )
+			related = related || std::fabs( ratio / k - 1.0 ) <= kTempoRelatedSlack;
+		if( std::fabs( ratio - 1.0 ) > kTempoFastJump && !related )
+		{
+			// The value. If the six-second window already agrees with the
+			// newest short reading, the change is old enough that all three
+			// readings are of the new music: their mean, which halves the
+			// short window's scatter (a few tenths at 30 fps). If it does not,
+			// the change is recent, the earlier short window straddles it and
+			// reads in between: the newest alone.
+			const bool wideAgrees = wide.status == Reading::Read && std::fabs( wide.bpm / s.bpm - 1.0 ) <= kTempoFastAgree;
+			mFastBpm              = wideAgrees ? ( s.bpm + mShortPrev + wide.bpm ) / 3.0 : s.bpm;
+		}
+	}
+	mShortPrev = good ? s.bpm : 0.0;
+}
+
+Tracker::Reading Tracker::Estimate( int n ) const
+{
+	Reading out;
 	constexpr double kWeight[ kTempoBands ] = { 1.0, 1.0, 0.5 };
 	constexpr int    kSmooth                = 6;  ///< kernel half-width, samples
 	constexpr double kSigma                 = 2.0;///< samples: 20 ms
@@ -472,7 +606,7 @@ void Tracker::DetectTempo()
 		power += x[ i ] * x[ i ];
 	power /= n;
 	if( !( power > 1e-18 ) )
-		return;
+		return out;
 	const int maxLag = std::min( kTempoMaxLag, n - 60 );
 	double    r[ kTempoMaxLag + 2 ] = {};
 	for( int lag = 0; lag <= maxLag; ++lag )
@@ -521,8 +655,8 @@ void Tracker::DetectTempo()
 	const double peak = PeakNear( r, maxLag, best );
 	if( peak < kTempoSettleR )
 	{
-		mCandidateBpm = 0.0;
-		return;
+		out.status = Reading::Weak;
+		return out;
 	}
 
 	// Refine on the peak of R at the largest multiple that fits (up to 4):
@@ -545,23 +679,16 @@ void Tracker::DetectTempo()
 	}
 	lag /= m;
 	lag *= 1.0 + debug.lagBias;
-	const double reading = 60.0 * kTempoRate / lag;
-	const auto   agrees  = []( double a, double b ) { return b > 0.0 && std::fabs( a / b - 1.0 ) <= kTempoAgree; };
-	const bool   publish = agrees( reading, mCandidateBpm ) || agrees( reading, mDetectedBpm );
-	mCandidateBpm        = reading;
-	mPeakR       = peak;
-	mMemberCount = count;
+	out.status  = Reading::Read;
+	out.bpm     = 60.0 * kTempoRate / lag;
+	out.peak    = peak;
+	out.members = count;
 	for( int i = 0; i < count; ++i )
 	{
-		mMemberBpm[ i ]   = 60.0 * kTempoRate / members[ i ];
-		mMemberShare[ i ] = scores[ i ] / top;
+		out.memberBpm[ i ]   = 60.0 * kTempoRate / members[ i ];
+		out.memberShare[ i ] = scores[ i ] / top;
 	}
-	if( publish )
-	{
-		mDetectedBpm   = reading;
-		mLastPublishAt = mNow;
-		mPublished     = true;
-	}
+	return out;
 }
 
 /// v0.1.0's detector, kept only as the harness's negative control: the raw
@@ -651,10 +778,14 @@ void Tracker::Frame( double seconds, const float* bins, int count )
 			mVuTime[ k ] -= mLastSeconds - seconds;
 			mLastFire[ k ] -= mLastSeconds - seconds;
 		}
-		mEnvOrigin -= mLastSeconds - seconds;
-		mLastPublishAt -= mLastSeconds - seconds;
-		mLastSoundAt -= mLastSeconds - seconds;
-		mLastConfirmAt -= mLastSeconds - seconds;
+		const double back = mLastSeconds - seconds;
+		mEnvOrigin -= back;
+		mLastPublishAt -= back;
+		mLastSoundAt -= back;
+		mLastConfirmAt -= back;
+		mLastAgreeAt -= back;
+		mFastUntil -= back;
+		mSoundBackAt -= back;
 		mLastSeconds = seconds;
 	}
 
@@ -665,6 +796,9 @@ void Tracker::Frame( double seconds, const float* bins, int count )
 	for( int j = 0; j < bands::kBins; ++j )
 		if( m[ j ] > kSoundLevel )
 		{
+			// The end of a silence long enough to have lost the tempo.
+			if( seconds - mLastSoundAt > kTempoSilenceSeconds )
+				mSoundBackAt = seconds;
 			mLastSoundAt = seconds;
 			break;
 		}

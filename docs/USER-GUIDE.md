@@ -282,9 +282,14 @@ detector hears.
 
 The header's `*` means the tempo is **confirmed and live**: three readings in a row, a second
 apart, that agree within 2 % and were each made on clear evidence while something was playing
-(about six seconds into a steady beat). It turns back to `?` when the music has been silent for
-two seconds, or when nothing has been confirmed for eight. This is the tempo Tempo Out trusts
-(below); the clock itself still follows the latest reading, as it always has.
+(about six seconds into a steady beat). The confirmed tempo is the average of the latest readings
+that agree, up to eight, so it does not wobble with them. Once a tempo is live, a clear change
+(more than 2 %, and not to half, double, two thirds or one and a half times it) is confirmed from
+the last three seconds alone, when two such readings in a row agree within 1 % on strong evidence:
+about three to four seconds after a hard cut. The `*` turns back to `?` when the music has been
+silent for two seconds, or when nothing has been confirmed for eight; after a silence that long,
+the music that follows is confirmed afresh. This is the tempo Tempo Out trusts (below); the clock
+itself still follows the latest reading, as it always has.
 
 Measured, through the offline harness's own FFT (not Resolume's):
 
@@ -319,7 +324,9 @@ anything the show depends on, use Host or Manual.
 
 ## Tempo Out: setting Resolume's tempo
 
-*Added in v0.2.0.*
+*Added in v0.2.0. v0.2.1 follows a change of tempo in seconds rather than up to ten, sends one
+message for it rather than the values in between, and says HOLD on the status row when it has
+nothing it trusts.*
 
 With **Send Tempo** on, Pattern pushes the tempo it hears into Resolume's own composition tempo,
 so the BPM-synced parts of a show follow the music without anyone typing a BPM. It can sit on a
@@ -341,34 +348,54 @@ would: one OSC message to Resolume's OSC input on this machine (127.0.0.1).
 
 The Tempo Out group is the last in the inspector, after About.
 
-With Hide Screen off, the row under the header says what Tempo Out is doing:
+With Hide Screen off, the row under the header says what Tempo Out is doing, whatever Tempo
+Source is set to:
 
 | row | meaning |
 | --- | --- |
-| `OSC 7000 WAITING` | on, nothing confirmed yet, and When Lost is Hold |
+| `OSC 7000 HOLD` | When Lost is Hold and nothing confirmed fits what is playing now: nothing confirmed yet, the tempo lost, or the detector no longer agreeing with the last one. Nothing new is sent; Resolume keeps its tempo |
 | `OSC 7000 125.0 SENT` | sent; Resolume's tempo has not come back yet |
-| `OSC 7000 125.0 OK` | Resolume's tempo is 125.0 |
+| `OSC 7000 125.0 OK` | Resolume's tempo is 125.0, and that is what the detector hears now |
+| `OSC 7000 120.0? OK` | the `?`: When Lost is Default and this is Default BPM, or a confirmed tempo the detector no longer agrees with |
 | `OSC 7000 125.0 NOT TAKEN` | sent four times and Resolume's tempo never changed: OSC Input is off, or on another port |
+| `OSC 7000 125.0 OVERRIDDEN` | Resolume took 125.0, then its tempo was changed by hand (or Link, or another controller); left alone until the music moves |
+| `OSC 7000 WAITING` | about to send (at most one message a second) |
 | `OSC 7000 SEND FAILED` | the network refused the message (the log says why) |
-| `OSC 7000 ANOTHER SENDS` | another SW Pattern is already sending; this one stays quiet |
+| `OSC 7000 ANOTHER SENDS` | another SW Pattern is sending; this one stays quiet |
 
 The log says the same in sentences (see [If it looks wrong](#if-it-looks-wrong)).
 
 ### What it sends, and when
 
-- **The confirmed tempo** (see Detected tempo): three readings in a row that agree, averaged. On
-  a steady beat that is about six seconds after it starts.
-- **Rounded to 0.1 BPM, and only when it moves by at least 0.5 BPM** from the last value sent,
-  and never more than once a second. A settled reading wobbles by a few tenths; Resolume's tempo
-  does not wobble with it.
+- **The confirmed tempo** (see Detected tempo). On a steady beat the first is sent about six
+  seconds after the beat starts.
+- **A change is followed in about 3 to 5 seconds**, as one message, never the values in between:
+  in the harness, a hard cut from one groove to another is sent 3 to 4 s after it, and the next
+  groove after a 3 s gap 4 to 6 s after it starts. Crossfades take longer, until the new beat
+  dominates: 7 to 10 s from the start of an 8 s crossfade. A change to half, double, two thirds or
+  one and a half times the tempo takes the careful path, 5 to 8 s as every change did in v0.2.0,
+  because those are the readings the detector can get wrong.
+- **Rounded to 0.1 BPM, and only when it moves by at least 0.5 BPM**, never more than once a
+  second. A settled reading wobbles by a few tenths; the confirmed tempo averages up to eight
+  readings, so Resolume's tempo does not wobble with it. The 0.5 is measured from the last value
+  sent, and from Resolume's own tempo when Resolume does not hold that value (it never took it, or
+  another SW Pattern sent since).
 - **Nothing if Resolume is already there.** Pattern reads Resolume's tempo back through the
   beat information Resolume gives every plugin. If it has not changed to what was sent within two
   seconds, the message is sent again, at most three more times, and then the row says
-  `NOT TAKEN`.
-- **It does not fight you.** Once Resolume has taken a tempo, change it by hand and it stays
-  changed until the music's tempo itself moves.
-- **One sender.** If several SW Pattern clips have Send Tempo on, the first one to run sends and
-  the others stand aside. If its clip stops, another takes over after two seconds.
+  `NOT TAKEN`. The next new value is still sent, so switching OSC Input on is enough once the
+  tempo next moves; to send the current one at once, switch Send Tempo off and on.
+- **It does not fight you.** Once Resolume has taken a tempo, change it by hand (or let Ableton
+  Link or another controller change it) and it stays changed until the detected tempo moves 0.5
+  BPM from the value Pattern last sent; the row says `OVERRIDDEN`. That holds across a break too:
+  a tempo you set while the beat is lost stays when the same beat comes back. This wins over
+  comparing with Resolume's tempo, so a new track within half a BPM of the old one does not undo
+  your hand.
+- **One sender, and it is one that has something to say.** If several SW Pattern clips have Send
+  Tempo on, one sends and the others show `ANOTHER SENDS`. A clip with nothing to send (nothing
+  confirmed, or the tempo lost under Hold) does not hold the job, so another clip that hears a
+  beat can send it; a clip sending only Default BPM gives way to one with a detected tempo. If the
+  sending clip stops, another takes over after two seconds.
 - The message is `/composition/tempocontroller/tempo` in Resolume's absolute form (the string
   `a`, then the BPM), so the value arrives as the BPM itself, fractions included. A plain number
   at that address is read by Resolume as 0 to 1 over its 20 to 500 BPM range, so a plain `120`
@@ -380,13 +407,17 @@ the detected tempo. With Send Tempo on, Host and Detected end up the same anyway
 ### When the beat is lost
 
 The tempo is **lost** when the music has been silent for two seconds, or nothing has been
-confirmed for eight (noise, speech, a breakdown with no pulse). **When Lost** decides what
-happens then:
+confirmed for eight (noise, speech, a breakdown with no pulse). A silence that long ends it: when
+the sound comes back, nothing is sent until the new music is confirmed. **When Lost** decides
+what happens meanwhile:
 
-- **Hold** (the default): nothing is sent, and Resolume keeps the last tempo it was given.
-- **Default**: **Default BPM** (60 to 200, 120 by default) is sent, once. It is also what is sent
-  before anything has been confirmed, so Resolume starts at Default BPM. With When Lost on
-  Default the row clock (on Detected) runs on Default BPM too while the tempo is lost.
+- **Hold** (the default): nothing is sent, Resolume keeps the last tempo it was given, and the
+  row says `HOLD`.
+- **Default**: **Default BPM** (60 to 200, 120 by default) is sent when the tempo is lost, and
+  before anything has been confirmed, so Resolume starts at Default BPM. It is one message each
+  time (with the usual resends if Resolume does not take it), not repeated while the beat stays
+  lost, and not sent over a tempo you then set by hand. With When Lost on Default the row clock
+  (on Detected) runs on Default BPM too while the tempo is lost.
 
 ### Hide Screen
 
@@ -412,6 +443,10 @@ or bypassed, has not been checked, and a clip that does not run sends nothing.
   against Arena 7.27.1 on Windows. The plugin's own sending, Resolume reporting the new tempo
   back to it, Hide Screen under Resolume's blend modes, and how the controls look in the
   inspector have not been seen in a Resolume yet.
+- **The timings above are the harness's.** How fast a change is followed, the one message per
+  change, the status row, and the hand-over between two clips were measured on grooves rendered
+  as audio through the harness's FFT, against a fake Resolume. None of v0.2.1 has run in Resolume
+  with audio.
 
 ---
 
@@ -467,9 +502,18 @@ restarted.
 
 **Resolume's tempo does not follow.** Read the row under the header (Hide Screen off) or the
 log. `NOT TAKEN`: Resolume's OSC input is off (Preferences → OSC → OSC Input) or on another port
-than OSC Port. `WAITING`: nothing has been confirmed yet; give a steady beat six seconds, and
-check that audio is reaching the layer. `ANOTHER SENDS`: another SW Pattern clip has Send Tempo
-on. The log's lines start `tempo out:`.
+than OSC Port. `HOLD`: there is no confirmed tempo for what is playing; give a steady beat six
+seconds, and check that audio is reaching the layer. `OVERRIDDEN`: Resolume's tempo was changed
+by hand after it took Pattern's; it is left alone until the music moves. `ANOTHER SENDS`: another
+SW Pattern clip is sending. The log's lines start `tempo out:`.
+
+**A change of track never reaches Resolume.** Usually the new music never confirms. Set Tempo
+Source to **Detected**: the header's BPM then shows what the detector reads, with `?` while it is
+not confirmed. A number that stays at `?` is music it cannot confirm (a breakbeat, no steady
+pulse, or a spectrum smeared by the host); the old number at `?` means it reads no pulse at all.
+The log says the same: the `tempo:` line reads "detected, not confirmed yet" or "detected, lost",
+and the `tempo out:` line says `HOLD` and why. Set the tempo by hand for that music, or switch
+When Lost to Default to fall back to Default BPM.
 
 **Resolume's tempo went to half or double.** The detector read the music at another metrical
 level (see Detected tempo). Set the tempo by hand, or turn Send Tempo off for that music.

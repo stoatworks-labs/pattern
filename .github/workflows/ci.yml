@@ -37,10 +37,11 @@ jobs:
         # tracker's published state: the cursor from a host clock at 499 million
         # ms, the onsets, frame one, the pitches, the ring, the detected tempo
         # on a metronome and on drum grooves rendered as audio, and Tempo Out
-        # (--osc sends to a listener it binds itself on 127.0.0.1).
+        # (--follow times it against changes of music; --osc sends to a
+        # listener it binds itself on 127.0.0.1).
         # That is what makes them meaningful on a runner with no GPU.
         run: |
-          for t in timing onset prime pitch ring detected groove send osc names font; do
+          for t in timing onset prime pitch ring detected groove send follow osc names font; do
             ./build/pntest "--$t"
           done
 

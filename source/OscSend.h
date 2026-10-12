@@ -56,25 +56,42 @@
 	Resolume. In order, per frame:
 
 	- **Off** sends nothing and gives up the sender's place.
-	- **One sender per process.** The first instance with Send Tempo on owns
-	  the tempo; any other stays quiet until the owner has not run a frame for
-	  two seconds (its clip stopped) and then takes over.
 	- **A target, or nothing.** The tracker's `TempoTarget()`: the CONFIRMED
 	  tempo while it is live (Tracker.h, "Confirmed, live and lost"), else
 	  Default BPM when When Lost says so, else nothing (Hold sends nothing
-	  new).
-	- **Rounded to 0.1 BPM, sent on a change of at least 0.5 BPM** from the
-	  last value sent, and at most once a second. A settled detector wobbles
-	  by a few tenths; a composition tempo that followed it would wobble too.
-	- **Already there** counts as sent: if Resolume's tempo (SetBeatInfo) is
-	  within 0.05 of the value, nothing goes out.
+	  new). `live` says which: a detected tempo, or the fallback.
+	- **One sender per process, and only one with something to say.** An
+	  instance with nothing to send does not hold the job: it lets go at
+	  once, so a second instance that has a confirmed tempo can send (v0.2.0
+	  kept the job for whichever ran first, and a second instance that had
+	  confirmed showed ANOTHER SENDS for ever). An owner sending only Default
+	  BPM gives way to one with a live detected tempo. Otherwise the owner
+	  keeps it until it has not run a frame for two seconds (its clip
+	  stopped), and then another takes over. A sender that gets the job back
+	  after another instance had it forgets what it last sent: Resolume's
+	  tempo is the other instance's now.
+	- **Rounded to 0.1 BPM, at most once a second, and only on a change of
+	  at least 0.5 BPM** -- from the last value sent, or from Resolume's own
+	  tempo (SetBeatInfo) when Resolume does not hold that value: it never
+	  took it, or another instance has sent since. (While Resolume does hold
+	  it the two are the same test.) A settled detector wobbles by a few
+	  tenths; a composition tempo that followed it would wobble too.
+	- **Already there** counts as sent: if Resolume's tempo is within 0.05 of
+	  the value, nothing goes out.
 	- **Did Resolume take it?** After a send, Resolume's tempo should arrive
 	  back through `SetBeatInfo`. If it has not come within 0.05 of the value
 	  in two seconds the message is sent again, at most three more times,
 	  and then the sender says NOT TAKEN and logs why it thinks so (OSC
-	  Input off, or another port). It does not fight an operator: once a
-	  value is taken, a hand on Resolume's tempo stays until the detected
-	  tempo itself moves.
+	  Input off, or another port). A NEW value is still sent after that when
+	  it is 0.5 from Resolume's tempo, so switching OSC Input on is enough.
+	- **It does not fight an operator.** Once Resolume has taken a value, a
+	  change to its tempo that this sender did not make -- a hand, Ableton
+	  Link, another controller -- is OVERRIDDEN, and stays until the detected
+	  tempo moves 0.5 BPM from the value this sender last sent. That rule
+	  wins over the comparison with Resolume's tempo, and holds across a
+	  lost beat: a tempo set by hand during a break stays when the same beat
+	  comes back. (`Debug::lastSentOnly` is v0.2.0's comparison with the
+	  last value sent and nothing else.)
 */
 namespace pattern
 {
@@ -125,19 +142,23 @@ class TempoSender
 public:
 	enum class State
 	{
-		Off,     ///< Send Tempo is off
-		Waiting, ///< on, with nothing to send yet
-		Sent,    ///< sent; Resolume's tempo has not come back yet
-		Taken,   ///< Resolume's tempo is the value sent
-		NotTaken,///< sent four times and Resolume's tempo never followed
-		Failed,  ///< the socket refused
-		NotOwner ///< another instance is sending
+		Off,       ///< Send Tempo is off
+		Waiting,   ///< on, with nothing to send (and not holding the sender's place)
+		Sent,      ///< sent; Resolume's tempo has not come back yet
+		Taken,     ///< Resolume's tempo is the value sent
+		NotTaken,  ///< sent four times and Resolume's tempo never followed
+		Failed,    ///< the socket refused
+		NotOwner,  ///< another instance is sending
+		Overridden ///< Resolume took the value, then its tempo was changed elsewhere
 	};
 
-	/// The negative control. Not reachable from a parameter.
+	/// The negative controls. Not reachable from a parameter.
 	struct Debug
 	{
-		bool noHysteresis = false;///< send every second whatever changed
+		bool noHysteresis  = false;///< send every second whatever changed
+		bool keepOwnership = false;///< v0.2.0: the first instance on keeps the job with nothing to send
+		bool lastSentOnly  = false;///< v0.2.0: the 0.5 BPM test against the last value sent only
+		bool ignoreHand    = false;///< compare with Resolume's tempo even when it was set by hand
 	};
 
 	using Sink = std::function< bool( double bpm ) >;
@@ -156,11 +177,12 @@ public:
 
 	void SetInstance( int instance ) { mInstance = instance; }
 
-	/// One frame. `target` <= 0 means nothing to send. `hostBpm` is the last
+	/// One frame. `target` <= 0 means nothing to send; `live` that the
+	/// target is a detected tempo, not the fallback. `hostBpm` is the last
 	/// SetBeatInfo, `hostSeen` whether there has been one. `now` is a
 	/// monotonic clock in seconds shared by every instance in the process.
 	/// Returns true when `sink` was called.
-	bool Step( bool enabled, double target, double hostBpm, bool hostSeen, double now, const Sink& sink );
+	bool Step( bool enabled, double target, bool live, double hostBpm, bool hostSeen, double now, const Sink& sink );
 
 	/// Forget what was sent, so the next frame sends again (a new port).
 	void Forget();
@@ -178,8 +200,9 @@ public:
 	Debug debug;
 
 private:
-	bool Claim( double now );
+	bool Claim( double now, bool live );
 	void Release();
+	void Reset();
 	bool Transmit( double value, double now, const Sink& sink );
 
 	int    mInstance   = 0;
@@ -188,6 +211,8 @@ private:
 	double mLastSendAt = -1e300;
 	int    mSends      = 0;
 	int    mResends    = 0;
+	bool   mDelivered  = false;///< Resolume's tempo has been the last value sent
+	bool   mByHand     = false;///< and has since been changed by something else
 };
 
 } // namespace pattern

@@ -11,7 +11,9 @@ the tempo on programme material (see "The detected tempo, v0.1.1").
 **Never loaded into Resolume on macOS**. v0.2.0 (2026-10-11) added **Tempo Out**
 (issue #5) — the detected tempo pushed into Resolume's composition tempo over
 OSC, a confirmed / live / lost state for the detector, Default BPM / When Lost,
-and Hide Screen (see "Tempo Out").
+and Hide Screen (see "Tempo Out"). v0.2.1 (issue #5 again, built 2026-10-12, not yet
+released) makes Tempo Out follow a change of music in seconds, as one message, and
+stops it from sending nothing (see "Tempo Out, v0.2.1").
 
 `CLAUDE.md` is the command reference. This file is the *why*: the idea, every
 number in the harness and where its tolerance comes from, the negative
@@ -94,6 +96,8 @@ write the spectrum with `SetParamElementValue`, which is what a host calls.
 | `--ring` | **3 of 3** pass-0-only rows cleared; both-pass rows carry pass 1; untouched rows empty; with Keep on, 3 of 3 survive; a jump of 520 rows clears all | Exact on cells. Onsets are placed on the first frame the plugin reports the cursor on a target row. |
 | `--detected` | within **+-1 BPM by 4.00 s** at 120/60 fps, 100/50, 150/60, 120/24 fps, holding for 12 s; the row clock at 120.02 over a host saying 77 | The detector reads from three seconds of envelope (300 samples at 100 Hz), once a second, and publishes a reading only when the one before agrees within 2 %, so 4.00 s is its first opportunity. +-1 BPM is the spec's allowance. |
 | `--groove` | **45 of 45** grooves within **+-1 BPM at the right metrical level by 4.00 s**, holding to 16 s, worst error after settling **0.26 BPM**; true beat's share of its family's best **>= 0.737**, double time's **<= 0.672**; the row clock at 124.84 and the header `BPM 125*` over a host saying 77 | Backbeat, kick-heavy backbeat, syncopated kick and syncopated pluck at 80, 90, 100, 110, 125, 140, 150, 160, 170 BPM; the video's house groove at 115..135; backbeat at 24, 30, 50 fps and house at 30 fps. Audio rendered in the harness (biquad-filtered integer-hash noise, swept sines) and read through the same 2048-point FFT as `--wav`, at 48 kHz, so leakage, window smear and frame-grid jitter are in the input. The 4.00 s is the first publication (above). The shares are the two sides of the level ratio 0.70; they are fixture-measured, not derived, and the binding cases are the syncopated pluck at 170 (true beat 0.737) and at 80 (double time 0.672). |
+| `--follow` | the house groove at 124, then house 128, backbeat 128, syncopated kick 140, syncopated pluck 100 or kick-heavy 90 by a cut, a 3 s gap or an 8 s crossfade, 30 and 60 fps: every change sent; a cut sent **4.00 s** after it, median and worst; every cut **one** message; **0** sends after a change that are not the new tempo (+-1 BPM) over all 30; **0** false sends in 72 runs of lock-then-noise | The 5 s ceiling is the brief's (v0.2.0: 6, worst 8). +-1 BPM is the spec's allowance, and every new groove reads at its nominal level, so the nominal tempo is the target. One message is exact: a correction 8 s later counts against it (the 30 fps crossfades have one; they are printed, not asserted). The latency is what the fake Resolume received, so the 1 s send interval is in it. |
+| `--send`, v0.2.1 | the backbeat at 128, 30 fps: **1** send in 60 s; the job goes to whoever has a tempo in all three hand-overs (B sends 128.1 at 6.00 s; 128.0 at 16.98 s, 2 s after A's music stops; over A's Default 110); the status row `HOLD` before the lock and from **26.03 s** after a beat at 124 turns into noise at 20 s, OK last at 26.02; no 124 after a 3 s silence under Default; after NOT TAKEN a 0.4 move reaches Resolume (120.1); an operator's 126 set in a break survives the same beat coming back (`OVERRIDDEN`) | HOLD within 8 s of the change: TempoCurrent's 3 s after the last agreeing publication, which the six-second window still makes for a few seconds. Exact everywhere else. |
 | `--tempo-wav` (verify.sh, when the backend checkout is present) | the release video's soundtrack: **44 of 44** readings from 4 s within +-1 of 125 at 30 fps and at 60 fps (124.50..125.04) | A real file, 48 s, 48 kHz, the track v0.1.0 read as 62 and 100 at 30 fps. |
 | `--grid` blocks | **0** of up to 57,600 s x s blocks not one colour | The shader divides `( pixel - origin )` by an integer scale and then by the cell size, all in integers on non-negative operands, so a colour boundary can only fall on a multiple of the scale from the origin. No tolerance: byte equality within a block. |
 | `--grid` outside | **0** of up to 172,800 pixels outside the screen not the background, +-1 code value | Every palette entry is a multiple of 1/15 or 1/3, so its 8-bit value is a whole number with room to spare (0.6666667 x 255 = 170.00001); +-1 is the float-to-unorm allowance and nothing else. |
@@ -119,6 +123,14 @@ write the spectrum with `SetParamElementValue`, which is what a host calls.
 | `--send` | no hysteresis (`TempoSender::Debug::noHysteresis`) | the steady 120 sent 54 times in 60 s, where the check allows 1 |
 | `--send` | Tempo Out trusts every publication (`TrackerDebug::unconfirmedTempo`) | 72 noise runs send 82 tempos, where the check allows 0 |
 | `--osc` | the plain float, `,f 120` (`debugPlainFloat`) — Resolume reads it as normalised and sets 500 | 44 bytes, tags `,f`: fails the byte check |
+| `--follow` | v0.2.0's confirmation (`TrackerDebug::noFastRelock` + `averageThree`) | a cut takes 6.00 s median (worst 8); 4 of 10 cuts are more than one message; 5 sends after a change are not the new tempo (125.0, 127.1 ... on the way to 128) |
+| `--follow` | the fast re-lock on the six-second window's thresholds, R 0.2 and 2 % (`laxFastRelock`) | 18 false sends in 72 lock-then-noise runs (69.5 .. 133.5) |
+| `--send` | v0.2.0's mean of three (`averageThree`) | the backbeat at 128, 30 fps, sent 14 times in 60 s (127.8 / 128.4 by turns) |
+| `--send` | v0.2.0's ownership (`TempoSender::Debug::keepOwnership`) | B never sends in any of the three hand-overs (NotOwner throughout) |
+| `--send` | v0.2.0's status row (`PatternPlugin::debugSenderOnlyStatus`, with `keepOwnership`) | "124.1 OK" to the end of the run, never HOLD; "120.0 OK" for Default BPM |
+| `--send` | v0.2.0's revival (`staleRevival`) | 124.2 sent at 33.00 s, as the sound comes back |
+| `--send` | v0.2.0's hysteresis (`lastSentOnly`) | Resolume stays at 100 after OSC Input goes on |
+| `--send` | the hand ignored (`ignoreHand`) | 120.4 sent over the operator's 126 |
 
 None of the perturbations is reachable from a parameter.
 
@@ -176,6 +188,38 @@ Reverted with `git checkout -- source/Shaders.cpp` on a committed file, and
 ## The traps
 
 Ordered by how much time they cost.
+
+**A single three-second reading scatters by half a BPM (v0.2.1).** The fast
+re-lock's first value decides whether a change is one message or two: the
+six-second run takes over after the hold, and if it lands 0.5 from the fast
+value Tempo Out sends a correction. Three seconds of a 60 fps metronome at 140
+read 139.4 .. 140.9 (sd 0.45; the six-second window 0.13), and the 30 fps
+grooves +-0.6. The prototype's mean of the two short readings carries the cut
+in its earlier window (house 128 cut: 127.08 and 128.14 gave 127.6, then a
+128.1 correction); the newer reading alone sent the metronome 140.6, then
+140.1. Combining the lag estimates at every beat multiple gained little (sd
+0.37). What works: if the six-second window already agrees with the newest
+short reading within 1 %, the change is old enough that all three readings are
+clean and their mean is the value; if not, the change is recent and the newest
+short reading stands alone. Every cut one message, and the metronome's 140.1.
+
+**In-between values came back through the hold (v0.2.1).** The first hold let
+six-second publications within 2 % of the fast value join the run: a backbeat
+cut to 128 at 30 fps went 128.4, then 127.7 (the run's mean of straddled
+values), then 128.2. During the hold a publication that agrees with the fast
+value now only keeps it live and clears the run; one that disagrees builds a
+run that may confirm only when the hold ends (so a wrong re-lock is undone at
++6 s, before it could go stale at +8).
+
+**Resolume's tempo is a float (v0.2.1).** Comparing the target with Resolume's
+reported tempo fired at exactly 0.5 where the comparison with the last value
+sent did not: 128.2 - 127.7 is 0.49999999999998579 in double, 128.2 - 127.7f is
+0.50000305. Five steady grooves re-sent until the comparison with Resolume was
+limited to when Resolume does not hold this sender's last value, which is the
+only time it says anything new.
+
+**The fake Resolume starts at 100.** A check that wants a Default BPM send with
+Default BPM 100 sees nothing: "already there". The hand-over check uses 110.
 
 **Noise publishes a tempo, and so does a window straddling a change (Tempo
 Out).** The first `--send` run had Hold sending 141.2 four seconds into
@@ -382,6 +426,15 @@ two seconds apart before NOT TAKEN; "already there" sends nothing; a value
 Resolume took is never re-asserted against an operator.** Chosen, not
 measured: the settled detector's wobble is a few tenths (0.26 worst on the
 grooves), and a tempo that followed it would re-time every BPM-synced clip.
+v0.2.1 measures the 0.5 from Resolume's reported tempo as well as the last
+value sent, but only when Resolume does not hold that value (it never took it:
+after NOT TAKEN a new value goes out, so switching OSC Input on is enough). When
+it held it and its tempo then moved without this sender -- a hand, Link,
+another controller -- the state is OVERRIDDEN, and only a move of 0.5 from the
+last value sent re-sends: **the operator rule wins over the comparison with
+Resolume, by decision.** It holds across a lost beat: an operator's tempo set
+in a break survives the same beat coming back. The cost: a new track within
+0.5 BPM of the old one does not undo a hand-set tempo.
 
 **The header's `*` now means confirmed and live**, not merely settled: it comes
 at about 6 s on a steady beat, not 4, and goes back to `?` two seconds into
@@ -390,7 +443,34 @@ same rule.
 
 **One sender per process**, a static owner with a two-second takeover, so two
 Pattern clips cannot fight over the tempo and a stopped clip does not hold the
-job for ever.
+job for ever. v0.2.1: an instance with nothing to send (Hold, nothing confirmed
+or lost) does not hold it at all, an owner sending only Default BPM gives way
+to one with a live detected tempo, and a sender that gets the job back after
+another instance had it forgets what it sent. v0.2.0's first-come owner kept
+the job with nothing to say, and a second instance that had confirmed a tempo
+showed ANOTHER SENDS for ever.
+
+**v0.2.1's numbers are the investigation's candidate 13, re-implemented.** A
+three-second reading every second while live; two in a row within 1 %, R 0.5
+each, sound, more than 2 % from the live tempo and not x1/2, x2/3, x3/2 or x2
+(3 % slack); a 6 s hold; the confirmed tempo the mean of up to 8 agreeing
+publications. Chosen on the prototype's measurements (`--follow`'s change set,
+150 steady grooves, 300 degraded cuts, 72 noise runs, 216 lock-then-noise
+runs), not derived. The fast value's rule (the three readings when the
+six-second window agrees, else the newest) and the hold's are this build's,
+after the traps above.
+
+**No settle send.** The brief offered one more send about 8 s after a change
+if the confirmed value had moved 0.2 from the last sent. The prototype measured
+it: 41 extra sends over the 150 steady grooves (every first lock is a "change"),
+against 1 without. Not clean, so not built; a change can still end up to 0.5
+from the six-second value (the hysteresis), as in v0.2.0.
+
+**The status row says HOLD, not WAITING, under Hold whenever nothing confirmed
+fits what is playing** -- nothing confirmed yet, lost, or `TempoCurrent()` false
+(live, but no qualifying publication has agreed with the confirmed tempo for
+3 s) -- whatever Tempo Source says. Under Default the value carries a `?`
+instead (`120.0? OK`). The header's `*` is unchanged: confirmed and live.
 
 **Hide Screen is transparent black** (all four channels 0), not the theme's
 background: under Alpha or Add it should add nothing.
@@ -464,6 +544,16 @@ audio input; and a cue script drove `Host BPM`, `Theme` and `Bin 30`.
 `--groove` (45 of 45, v0.1.0's detector failing 15), the release video's
 soundtrack at 30 and 60 fps (44 of 44 readings each), and `--grid` under the
 software renderer; the About block regenerated by `sync-about.py` at v0.1.1.
+
+**Tempo Out, v0.2.1, 2026-10-12** (branch `claude/v0.2.1-relock`, not
+released): `--follow` added and `--send` extended, numbers above; `--groove`
+and `--detected` print byte for byte what v0.2.0's build prints (the six-second
+detector did not change: `Estimate` is its old body); the demo's port run
+against the C++ `Tracker` on seven spectrum programmes (cuts at 30 and 60 fps,
+a crossfade, a metronome change, a gap, a beat into noise, a steady groove):
+360 detection cycles, confirmed tempo, live, lost and the fast re-lock flag
+identical to six decimals (a scratch driver, not in verify.sh). None of it has
+met Resolume.
 
 **Tempo Out, 2026-10-11** (v0.2.0), `tools/verify.sh` all green with `--send`
 and `--osc` added: the numbers in "Tempo Out" below; Hide Screen's 230,400
@@ -709,7 +799,35 @@ its tempo through SetBeatInfo every frame, starting at 100):
 | the video's house groove at 125, 30 fps, as audio | one send, 124.8 at 6.00 s |
 | 72 runs x 60 s of steady noise as audio | 0 sends (82 with `unconfirmedTempo`) |
 | two instances | one send between them; the second takes over at 12.00 s when the first stops at 10 |
+| (v0.2.1) 120 for 20 s then 140 | 120.0 at 6.00, 140.1 at 24.00 (the fast re-lock; v0.2.0 140.0 at 27.00) |
 | on the wire | exactly `/composition/tempocontroller/tempo\0\0 ,sf\0 a\0\0\0 42f00000`, 48 bytes, on a kernel-chosen port; a port change re-sends at once; off sends nothing |
+
+### Tempo Out, v0.2.1
+
+Steve (VJPandaAU, #5): slow to follow a tempo change, and sometimes sends
+nothing. Measured first (the investigation, 2026-10-12), then built:
+
+| | v0.2.0 | v0.2.1 |
+| --- | --- | --- |
+| hard cut, house 124 to five grooves, 30 and 60 fps (10) | 6.0 s median, 8.0 worst; 4 of 10 more than one message | **4.0 s** median and worst; every one one message |
+| 3 s gap (10), from the new music | 5.0 median, 6.0 worst | 5.0, 6.0 (the tempo is lost in the gap; the new music is a first lock) |
+| 8 s crossfade (10), from its start | 11.0 median, 12.0 worst | **8.0**, 10.0 |
+| sends after a change that are not the new tempo (30 changes) | 5 | **0** |
+| a change to x2/3, x3/2, x1/2 or x2 (backbeat and house, 12 runs) | 5..8 s, one message each | identical, send for send (the slow path, by design) |
+| 72 one-minute noise runs | 0 sends | 0 sends |
+| 216 lock-then-noise runs (locks at 100, 124, 150) | 0 false sends | 0 false sends |
+| 150 steady grooves (5 kinds x 15 tempos x 2 fps, 8 ms jitter) | 29 re-sends in 9 runs (backbeat 128, 30 fps: 127.7 / 128.4 nine times) | **1** (syncopated pluck 128, 30 fps: 127.6, then 128.1 at 12 s) |
+| 300 degraded cuts (jitter, FFT hop 1024/2048, a falling FFT) | never sent 8; median first send 6.0 s; 52 runs with a wrong send | never sent 8 (the same 8: the new music never confirms); median **4.0 s**; **7** runs with a wrong send |
+| the status row while the new music never confirms | `<old> OK` for ever | `HOLD` within about 6 s |
+| a second instance that confirms while the first hears nothing | never sends | sends |
+
+The 8 never-sends are the breakbeat (and the house groove at 160 with the
+coarsest FFT) never confirming: the rules for trusting a tempo are unchanged,
+so the fix there is to say so (HOLD) and to tell the operator how to see it
+(Tempo Source = Detected; the log). The v0.2.0 column is this build with every
+v0.2.0 rule switched back on (`v020Rules` in the harness), which reproduces the
+investigation's numbers for the shipped plugin exactly (29 re-sends, 8 of 300,
+52 runs, 6.0 s).
 
 **What it still gets wrong, by construction:** it sends what the detector
 confirms, at the detector's metrical level — the breakbeat and the off-beat
@@ -759,3 +877,7 @@ on Timeline.
 10. **Should Tempo Out fold the tempo into an operator's range** (say
     90..180) to stop half / double readings reaching the show? Cheap, and the
     obvious next step if real music bears the octave errors out.
+11. **Does the three-second re-lock hold on programme material through
+    Resolume's FFT?** Its thresholds (R 0.5, 1 %) were chosen on rendered
+    grooves; on the long window's own (R 0.2, 2 %) noise after a lock sent 18
+    false tempos in 72 runs, so the margin is real but unmeasured on music.
