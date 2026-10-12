@@ -10,7 +10,7 @@
 > metronome and drum grooves from 80 to 170 BPM are read within ±1 BPM at the right metrical
 > level in 4.0 s (`--detected`, `--groove`). All 20 controls that draw change the picture, and
 > the bundle registers and draws under the fleet's oxbow host. **It has never been loaded into
-> Resolume on macOS**, and no real audio has reached it in a host. The full rundown, including
+> Resolume on macOS**, and no real audio has reached it in a host of mine. The full rundown, including
 > what filming the release video turned up, is in the Status section below.
 
 A tracker's pattern editor for Resolume Arena and Avenue, where nobody types the notes in: the
@@ -139,8 +139,10 @@ nothing; the status row says `HOLD`) or Default (send Default BPM).
 It sends the detector's mistakes too (a breakbeat or an off-beat bass at 80–90 can
 set Resolume to half or double), and a music clip on BPM Sync transport would hear
 every change it makes, so keep music on Timeline. The user guide has the set-up,
-the status row and the caveats. **The plugin itself has never sent a tempo to a
-Resolume.**
+the status row and the caveats. **On my own machines the plugin itself has never
+sent a tempo to a Resolume.** One user had v0.2.0 setting the tempo on his rig and
+found it slow to follow a change ([#5](https://github.com/stoatworks-labs/pattern/issues/5)), which is
+what v0.2.1 changed.
 
 ## What it reads, and what is assumed
 
@@ -256,12 +258,15 @@ What isn't verified yet:
 - **Never loaded into Resolume on macOS.** Everything above is the offline
   harness driving the real plugin class in a headless GL context. How the 22
   controls in four groups show up in the inspector there is untested.
-- **Tempo Out has never sent a tempo to a Resolume.** The message form was
-  measured in Arena 7.27.1 on Windows by sending it from outside the plugin.
+- **Tempo Out has never sent a tempo to a Resolume of mine.** One user had v0.2.0
+  setting the tempo on his rig and found it slow to follow a change, and sometimes not following at
+  all ([#5](https://github.com/stoatworks-labs/pattern/issues/5)), which is what
+  v0.2.1 changed. The message form was measured in Arena 7.27.1 on Windows by
+  sending it from outside the plugin.
   The plugin's own send, Resolume reporting the new tempo back through
   `SetBeatInfo`, a clip at zero opacity still running, and Hide Screen under
   Resolume's blend modes are all unmeasured.
-- **No real audio has reached it in a host.** The 64 bins' layout, value law and
+- **No real audio has reached it in a host of mine.** The 64 bins' layout, value law and
   sample rate are assumed (`Bin Law`, `Bin Value`, `SetSampleRate`), and the
   onset detector's thresholds were set on synthetic spectra and synthesised
   tracks, not on programme material through Resolume's FFT.
@@ -273,8 +278,9 @@ What isn't verified yet:
   all 28 host controls matching the declaration (2026-10-12; v0.1.0 passed the
   same with 23, and its five visual controls moved the picture), which is 9 of
   the fleet gate's 9 checks. The box has no sound device, so its 12
-  audio-driven controls weren't exercised there, and the Manual BPM couldn't
-  be shown moving on the gate's still.
+  audio-driven controls weren't exercised there. Of the other nine, eight moved
+  the picture, the Manual BPM among them (v0.1.0's run couldn't show it), and
+  When Lost was inconclusive on the gate's still.
 - No factory presets and no OpenFX port. There's a [user
   guide](https://stoatworks-labs.com/software/pattern/guide/) and a [browser
   demo](https://pattern-demo.stoatworks-labs.com), which is a port rather than

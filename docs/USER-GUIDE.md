@@ -40,18 +40,21 @@ blue row is the cursor.*
 > only send, are checked against a socket the harness owns).
 >
 > It has **never been loaded into Resolume on macOS**, and **no real audio has reached it in a
-> host**: the one host it's run in there is the fleet's own test host, `oxbow`. On Windows, a
+> host of mine**: the one host I've run it in there is the fleet's own test host, `oxbow`. On Windows, a
 > build of the v0.2.1 code loads, registers as a source and renders in Resolume Arena 7.27.1,
 > with all 28 host controls matching what the plugin declares (2026-10-12; v0.1.0 passed the
 > same with 23). That was on software rendering (win-lab, Mesa llvmpipe, no GPU), so it says
 > nothing about a GPU. That box has no sound device, so its 12 audio-driven controls weren't
-> exercised there, and the Manual BPM couldn't be shown moving on the gate's still picture (it
-> changes three digits in the header). Try it on a spare layer before you put it in a show.
+> exercised there. Of the other nine, eight moved the picture, the Manual BPM among them (it
+> changes three digits in the header, which v0.1.0's run couldn't show), and When Lost was
+> inconclusive on the gate's still picture. Try it on a spare layer before you put it in a show.
 >
 > **Tempo Out is new in v0.2.0 and unverified in a host.** What it sends was measured
-> against Resolume Arena 7.27.1 by sending the same message from outside the plugin. The
-> plugin itself has never sent anything to a Resolume, and nothing has checked that Resolume
-> reports its new tempo back to the plugin. See [Tempo Out](#tempo-out-setting-resolumes-tempo).
+> against Resolume Arena 7.27.1 by sending the same message from outside the plugin. On my
+> own machines the plugin itself has never sent anything to a Resolume (one user had v0.2.0
+> setting the tempo on his rig, and found it slow to follow a change:
+> [#5](https://github.com/stoatworks-labs/pattern/issues/5)), and nothing has checked that
+> Resolume reports its new tempo back to the plugin. See [Tempo Out](#tempo-out-setting-resolumes-tempo).
 >
 > This codebase was created with AI assistance, directed and reviewed by a human author.
 
@@ -449,10 +452,12 @@ or bypassed, hasn't been checked, and a clip that doesn't run sends nothing.
   in the Link session too. Not checked.
 - **Nothing here has met Resolume's own audio.** The detector has been measured on rendered
   grooves and a synthesised track through the harness's FFT, never on music through Resolume's.
-- **The plugin has never sent a tempo to a Resolume.** The message itself was checked by hand
-  against Arena 7.27.1 on Windows. The plugin's own sending, Resolume reporting the new tempo
-  back to it, Hide Screen under Resolume's blend modes, and how the controls look in the
-  inspector haven't been seen in a Resolume yet.
+- **The plugin has never sent a tempo to a Resolume of mine.** The one report from a real rig
+  (v0.2.0, [#5](https://github.com/stoatworks-labs/pattern/issues/5)) had it setting
+  Resolume's tempo but slow to follow a change, which is what v0.2.1 changed. The message
+  itself was checked by hand against Arena 7.27.1 on Windows. The plugin's own sending,
+  Resolume reporting the new tempo back to it, Hide Screen under Resolume's blend modes, and
+  how the controls look in the inspector haven't been seen in a Resolume of mine yet.
 - **The timings above are the harness's.** How fast a change is followed, the one message per
   change, the status row, and the hand-over between two clips were measured on grooves rendered
   as audio through the harness's FFT, against a fake Resolume. None of v0.2.1 has run in Resolume
@@ -545,7 +550,7 @@ doing: what it sent, whether Resolume took it, and if not, the likely reason.
 
 ## Known limits
 
-- **Never loaded into Resolume on macOS**, and no real audio has reached it in a host. How
+- **Never loaded into Resolume on macOS**, and no real audio has reached it in a host of mine. How
   Resolume lays out its 64 bins, whether they're magnitudes or powers, and what sample rate
   stands behind them are assumptions with switches (Bin Law, Bin Value) and the host's own
   sample-rate call, 44.1 kHz when it never comes. The onset thresholds were set on synthetic
@@ -566,8 +571,10 @@ doing: what it sent, whether Resolume took it, and if not, the likely reason.
 - **The font is a 5 × 7 in a 6 × 8 cell**, my own; a tracker's wider 8 × 8 face wasn't drawn
   for this release.
 - **Checked at 640 × 360 and 320 × 180** in the harness, and only timed at 720p, 1080p and
-  4K. Only ever run on an Apple M4 Max, although the macOS build contains an Intel slice.
-- **Tempo Out has never been run against a Resolume** (see Tempo Out, "Before you rely on it").
+  4K. On a Mac I've only run it on Apple silicon (an M4 Max, and CI's macOS runner), although
+  the macOS build contains an Intel slice.
+- **I've never run Tempo Out against a Resolume**; one user has (see Tempo Out, "Before you
+  rely on it").
 - **No presets** and no OpenFX version.
 - **There's a browser demo** at [pattern-demo.stoatworks-labs.com](https://pattern-demo.stoatworks-labs.com).
   It's a port to a web page rather than the plugin: the shader runs in WebGL2 and the tracker, the
