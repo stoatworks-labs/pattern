@@ -267,13 +267,14 @@ What isn't verified yet:
   tracks, not on programme material through Resolume's FFT.
 - **The harness has run on this Mac's GPU and on CI's software renderer**
   (`ci.yml`, green on the release commit); nothing has timed it anywhere else.
-- **On Windows it has been loaded into Resolume**: a build of this source
+- **On Windows it has been loaded into Resolume**: a build of the v0.2.1 code
   loads, registers as `SW Pattern` / `PN01` / source and renders in Resolume
   Arena 7.27.1 on software rendering (win-lab, Mesa llvmpipe, no GPU), with
-  all 23 host controls matching the declaration and the five visual controls
-  moving the picture, which is 9 of the fleet gate's 9 checks. The box has no
-  sound device, so its 12 audio-driven controls weren't exercised there, and the
-  Manual BPM couldn't be shown moving on the gate's still.
+  all 28 host controls matching the declaration (2026-10-12; v0.1.0 passed the
+  same with 23, and its five visual controls moved the picture), which is 9 of
+  the fleet gate's 9 checks. The box has no sound device, so its 12
+  audio-driven controls weren't exercised there, and the Manual BPM couldn't
+  be shown moving on the gate's still.
 - No factory presets and no OpenFX port. There's a [user
   guide](https://stoatworks-labs.com/software/pattern/guide/) and a [browser
   demo](https://pattern-demo.stoatworks-labs.com), which is a port rather than
@@ -344,7 +345,7 @@ line.
 
 ## Building and testing
 
-The offline harness drives the real plugin class. Eleven of its twelve check groups
+The offline harness drives the real plugin class. Twelve of its thirteen check groups
 don't open a GL context at all, because what they check is the tracker's published
 state, and a rasteriser has no opinions about that:
 
@@ -387,7 +388,7 @@ pattern writes a plain-text log every time it runs:
 
 It records the build, the GL driver, what unit the host's clock turned out to
 be in, whether any audio reached the layer, and which tempo the clock is following
-(the first two of which are the commonest reasons a pattern never fills), and,
+(those last two are the commonest reasons a pattern never fills), and,
 once Send Tempo has been on, each change in what Tempo Out is doing (those lines
 start `tempo out:`).
 

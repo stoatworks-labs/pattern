@@ -19,7 +19,7 @@ blue row is the cursor.*
 
 > **Before you rely on this:** it's at **v0.2.1**, and still early days. The tracker is
 > measured rather than taken on trust, by a harness that drives the real plugin class, and
-> nine of its ten check groups don't open a GL context at all. They show that:
+> twelve of its thirteen check groups don't open a GL context at all. They show that:
 >
 > - the row cursor sits on floor(t / T) mod 64 on every one of 36,000 frames of a ten-minute
 >   run at 60 fps (and 30,000 at 50, 18,000 at 30) from a host clock at 499,000,000 ms, with
